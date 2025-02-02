@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(box2d_hello_world C)
+project(PGGameServer C)
 
 set(CMAKE_C_STANDARD 11)
 
