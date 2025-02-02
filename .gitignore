@@ -1,0 +1,15 @@
+# Build directory
+build/
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Compiled binaries
+box2d_hello
+
+# IDE specific files
+.vscode/
+.idea/
