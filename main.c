@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "ship_shapes.h"
+#include "network.h"
+#include "game_state.h"
 
 // GUI Button structure
 typedef struct {
@@ -13,19 +15,6 @@ typedef struct {
     Color hoverColor;
     bool isHovered;
 } GuiButton;
-
-// Add after the GuiButton structure
-typedef struct {
-    b2BodyId id;
-    Vector2 screenPos;
-    b2Vec2 physicsPos;
-} Ship;
-
-typedef struct {
-    Ship* ships;
-    int capacity;
-    int count;
-} ShipArray;
 
 // Create a button
 GuiButton CreateButton(float x, float y, float width, float height, const char* text, Color color) {
@@ -61,19 +50,6 @@ bool GuiButtonUpdate(GuiButton* button) {
 // Conversion factors between physics and screen coordinates
 #define PIXELS_PER_METER 1.0f
 #define METER_PER_PIXEL 1.0f
-
-// Camera state
-typedef struct {
-    Vector2 target;
-    float zoom;
-    Vector2 offset;
-    Vector2 dragStart;
-    bool isDragging;
-    int shipsCreated;  // Add this to Camera2DState
-    bool isPlacingShip;
-    Vector2 placementPreview;
-    ShipArray ships;  // Add this new field
-} Camera2DState;
 
 // Convert Box2D coordinates to screen coordinates with camera transformation
 Vector2 physicsToScreen(b2Vec2 position, const Camera2DState* camera) {
@@ -259,9 +235,21 @@ int main() {
 
     // Create GUI buttons
     GuiButton createShipButton = CreateButton(10, 150, 200, 40, "Create Ship", SKYBLUE);
+
+    // Initialize network server
+    NetworkServer server;
+    if (!initServer(&server)) {
+        return -1;
+    }
     
     // Main game loop
     while (!WindowShouldClose()) {
+        // Accept any new clients
+        acceptNewClients(&server);
+        
+        // Handle network messages
+        handleNetworkMessages(&server, worldId, &camera);
+
         // Update camera
         UpdateGameCamera(&camera);
 
@@ -303,6 +291,9 @@ int main() {
         // Update physics
         b2World_Step(worldId, timeStep, subStepCount);
 
+        // Broadcast world state to clients
+        broadcastWorldState(&server, &camera);
+
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
@@ -340,6 +331,7 @@ int main() {
     }
 
     // Cleanup
+    cleanupServer(&server);
     b2DestroyWorld(worldId);
     free(camera.ships.ships);
     CloseWindow();

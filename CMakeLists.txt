@@ -26,9 +26,36 @@ if (NOT raylib_FOUND)
     FetchContent_MakeAvailable(raylib)
 endif()
 
-# Add executable
-add_executable(box2d_hello main.c)
+# Find CURL
+find_package(CURL REQUIRED)
 
-# Include and link Box2D and raylib
-target_include_directories(box2d_hello PRIVATE ${BOX2D_INCLUDE_DIR})
-target_link_libraries(box2d_hello ${BOX2D_LIBRARY} raylib m)
+# Find JSON-C
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JSONC REQUIRED json-c)
+
+# Find libwebsockets
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBWEBSOCKETS REQUIRED libwebsockets)
+
+# Add executable with both main.c and network.c
+add_executable(box2d_hello 
+    main.c
+    network.c
+)
+
+# Include and link Box2D, raylib, CURL, JSON-C, and libwebsockets
+target_include_directories(box2d_hello PRIVATE 
+    ${BOX2D_INCLUDE_DIR}
+    ${RAYLIB_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
+    ${JSONC_INCLUDE_DIRS}
+    ${LIBWEBSOCKETS_INCLUDE_DIRS}
+)
+target_link_libraries(box2d_hello PRIVATE
+    ${BOX2D_LIBRARY}
+    raylib
+    ${CURL_LIBRARIES}
+    ${JSONC_LIBRARIES}
+    ${LIBWEBSOCKETS_LIBRARIES}
+    m
+)
