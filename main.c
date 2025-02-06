@@ -4,66 +4,20 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "ship_shapes.h"
-#include "network.h"
 #include "game_state.h"
+#include <signal.h>
+#include "admin_console.h"
+#include "admin_window.h"
+#include <time.h>
+#include "coord_utils.h"
 
-// GUI Button structure
-typedef struct {
-    Rectangle bounds;
-    const char* text;
-    Color color;
-    Color hoverColor;
-    bool isHovered;
-} GuiButton;
+// Unified timing constants
+#define PHYSICS_UPDATE_HZ 60        // Physics runs at 60Hz
+#define VISUAL_UPDATE_HZ 1          // Visual updates at 1Hz
+#define TARGET_FPS 60               // Target 60 FPS
+#define PHYSICS_TIME_STEP (1.0f / PHYSICS_UPDATE_HZ)
+#define VISUAL_TIME_STEP (1.0f / VISUAL_UPDATE_HZ)
 
-// Create a button
-GuiButton CreateButton(float x, float y, float width, float height, const char* text, Color color) {
-    return (GuiButton){
-        .bounds = (Rectangle){x, y, width, height},
-        .text = text,
-        .color = color,
-        .hoverColor = ColorBrightness(color, 0.2f),
-        .isHovered = false
-    };
-}
-
-// Update and draw button, returns true if clicked
-bool GuiButtonUpdate(GuiButton* button) {
-    Vector2 mousePoint = GetMousePosition();
-    button->isHovered = CheckCollisionPointRec(mousePoint, button->bounds);
-    
-    // Draw button
-    DrawRectangleRec(button->bounds, button->isHovered ? button->hoverColor : button->color);
-    DrawRectangleLinesEx(button->bounds, 2, BLACK);
-    
-    // Center text
-    int textWidth = MeasureText(button->text, 20);
-    Vector2 textPos = {
-        button->bounds.x + (button->bounds.width - textWidth) / 2,
-        button->bounds.y + (button->bounds.height - 20) / 2
-    };
-    DrawText(button->text, textPos.x, textPos.y, 20, BLACK);
-    
-    return button->isHovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-}
-
-// Conversion factors between physics and screen coordinates
-#define PIXELS_PER_METER 1.0f
-#define METER_PER_PIXEL 1.0f
-
-// Convert Box2D coordinates to screen coordinates with camera transformation
-Vector2 physicsToScreen(b2Vec2 position, const Camera2DState* camera) {
-    float screenX = (position.x * PIXELS_PER_METER * camera->zoom) + camera->offset.x + GetScreenWidth() / 2;
-    float screenY = GetScreenHeight() / 2 - (position.y * PIXELS_PER_METER * camera->zoom) + camera->offset.y;
-    return (Vector2){ screenX, screenY };
-}
-
-// Convert screen coordinates to physics coordinates
-b2Vec2 screenToPhysics(Vector2 screenPos, const Camera2DState* camera) {
-    float physX = ((screenPos.x - GetScreenWidth() / 2 - camera->offset.x) / camera->zoom) * METER_PER_PIXEL;
-    float physY = ((GetScreenHeight() / 2 - screenPos.y + camera->offset.y) / camera->zoom) * METER_PER_PIXEL;
-    return (b2Vec2){ physX, physY };
-}
 
 // Update game camera based on input
 void UpdateGameCamera(Camera2DState* camera) {
@@ -113,61 +67,58 @@ void DrawPhysicsBox(Vector2 center, float angle, Vector2 size, Color color, cons
     DrawCircleV(center, 3.0f, RED);
 }
 
+// Replace the DrawPhysicsGrid function
 void DrawPhysicsGrid(float spacing, const Camera2DState* camera) {
     int screenWidth = GetScreenWidth();
     int screenHeight = GetScreenHeight();
     int centerX = screenWidth / 2;
     int centerY = screenHeight / 2;
     
-    // Draw center lines
-    DrawLine(0, centerY, screenWidth, centerY, Fade(GRAY, 0.5f));  // X axis
-    DrawLine(centerX, 0, centerX, screenHeight, Fade(GRAY, 0.5f)); // Y axis
+    // Calculate grid spacing for 1000 unit increments
+    float zoomedSpacing = 1000.0f * camera->zoom;
+    Color subGridColor = Fade(GRAY, 0.2f);
+    Color textColor = Fade(DARKGRAY, 0.5f);
     
-    // Draw grid with larger spacing for better visibility
-    float gridSpacing = spacing * 50.0f * camera->zoom;  // Increase grid spacing for readability
-    for(float i = gridSpacing; i < screenWidth/2; i += gridSpacing) {
-        // Vertical lines
-        DrawLine(centerX + i + camera->offset.x, 0, centerX + i + camera->offset.x, screenHeight, Fade(LIGHTGRAY, 0.3f));
-        DrawLine(centerX - i + camera->offset.x, 0, centerX - i + camera->offset.x, screenHeight, Fade(LIGHTGRAY, 0.3f));
-        
-        // Horizontal lines
-        DrawLine(0, centerY + i + camera->offset.y, screenWidth, centerY + i + camera->offset.y, Fade(LIGHTGRAY, 0.3f));
-        DrawLine(0, centerY - i + camera->offset.y, screenWidth, centerY - i + camera->offset.y, Fade(LIGHTGRAY, 0.3f));
-        
-        // Draw coordinates (showing every 50 meters)
-        DrawText(TextFormat("%.0f", i * METER_PER_PIXEL), centerX + i + camera->offset.x, centerY + camera->offset.y, 10, GRAY);
-        DrawText(TextFormat("%.0f", -i * METER_PER_PIXEL), centerX - i + camera->offset.x, centerY + camera->offset.y, 10, GRAY);
-        DrawText(TextFormat("%.0f", -i * METER_PER_PIXEL), centerX + camera->offset.x, centerY + i + camera->offset.y, 10, GRAY);
-        DrawText(TextFormat("%.0f", i * METER_PER_PIXEL), centerX + camera->offset.x, centerY - i + camera->offset.y, 10, GRAY);
-    }
-}
-
-// Add function to draw ship shape
-void DrawShipHull(Vector2 center, float angle, Color color, const Camera2DState* camera) {
-    // Convert ship vertices to screen space
-    b2Hull hull = createShipHullShape();
-    Vector2 points[6];
+    // Calculate how many grid lines we need in each direction
+    int numLinesX = (screenWidth / zoomedSpacing) + 2;
+    int numLinesY = (screenHeight / zoomedSpacing) + 2;
     
-    for (int i = 0; i < hull.count; i++) {
-        // Rotate point
-        float cs = cosf(angle);
-        float sn = sinf(angle);
-        float px = hull.points[i].x * cs - hull.points[i].y * sn;
-        float py = hull.points[i].x * sn + hull.points[i].y * cs;
-        
-        // Scale and translate to screen space
-        points[i] = (Vector2){
-            (px / SHIP_SCALE) * camera->zoom + center.x,
-            (py / SHIP_SCALE) * camera->zoom + center.y
-        };
+    // Calculate where the (0,0) point is on screen
+    float originX = centerX + camera->offset.x;
+    float originY = centerY + camera->offset.y;
+    
+    // Draw vertical grid lines
+    for (int i = -numLinesX/2; i <= numLinesX/2; i++) {
+        float x = originX + (i * zoomedSpacing);
+        if (x >= 0 && x <= screenWidth) {
+            DrawLineV((Vector2){x, 0}, (Vector2){x, screenHeight}, subGridColor);
+            // Draw coordinate label (shows actual world coordinates)
+            int worldX = (int)(i * 1000); // Each line represents 1000 units
+            DrawText(TextFormat("%d", worldX), x + 5, originY + 5, 20, textColor);
+        }
     }
     
-    // Draw ship hull
-    DrawLineStrip(points, hull.count, color);
-    DrawLineV(points[hull.count-1], points[0], color);
+    // Draw horizontal grid lines
+    for (int i = -numLinesY/2; i <= numLinesY/2; i++) {
+        float y = originY + (i * zoomedSpacing);
+        if (y >= 0 && y <= screenHeight) {
+            DrawLineV((Vector2){0, y}, (Vector2){screenWidth, y}, subGridColor);
+            // Draw coordinate label (shows actual world coordinates)
+            int worldY = (int)(-i * 1000); // Negative because Y is inverted in screen space
+            DrawText(TextFormat("%d", worldY), originX + 5, y + 5, 20, textColor);
+        }
+    }
     
-    // Draw center point
-    DrawCircleV(center, 3.0f, RED);
+    // Draw main axes with higher alpha
+    DrawLineEx((Vector2){0, originY}, 
+               (Vector2){screenWidth, originY}, 
+               2.0f, Fade(GRAY, 0.9f));
+    DrawLineEx((Vector2){originX, 0},
+               (Vector2){originX, screenHeight},
+               2.0f, Fade(GRAY, 0.9f));
+    
+    // Draw origin marker
+    DrawText("(0,0)", originX + 10, originY + 10, 20, RED);
 }
 
 // Add before main():
@@ -197,143 +148,175 @@ void updateShipPositions(b2WorldId worldId, Camera2DState* camera) {
         ship->screenPos = screenPos;
         ship->physicsPos = pos;
         
-        // Convert b2Rot to angle in radians for DrawShipHull
-        // b2Rot contains cos/sin values, use atan2 to get the angle
         float angle = atan2f(rot.s, rot.c);
         
-        // Draw the ship
+        // Now properly declared in ship_shapes.h
         DrawShipHull(screenPos, angle, BLUE, camera);
     }
 }
 
-int main() {
-    // Initialize window
-    InitWindow(1280, 920, "Box2D with Raylib");
-    SetTargetFPS(60);
+// Add admin commands
+typedef enum {
+    CMD_NONE,
+    CMD_LIST_SHIPS,
+    CMD_ADD_SHIP,
+    CMD_DELETE_SHIP,
+    CMD_HELP
+} AdminCommand;
 
-    // Create the world
+// Add ship management functions
+void printShipList(const ShipArray* ships) {
+    printf("\n--- Ships List ---\n");
+    for (int i = 0; i < ships->count; i++) {
+        Ship* ship = &ships->ships[i];
+        printf("Ship %d: Pos(%.1f, %.1f)\n", 
+               i, ship->physicsPos.x, ship->physicsPos.y);
+    }
+    printf("----------------\n");
+}
+
+void printAdminHelp() {
+    printf("\nCommands:\n");
+    printf("L - List all ships\n");
+    printf("A - Add ship (follow with x y coordinates)\n");
+    printf("D - Delete ship (follow with ship number)\n");
+    printf("H - Show this help\n");
+}
+
+// Add debug logging function
+void logDebug(const char* format, ...) {
+    time_t now;
+    time(&now);
+    char timestamp[26];
+    ctime_r(&now, timestamp);
+    timestamp[24] = '\0';  // Remove newline
+    
+    va_list args;
+    va_start(args, format);
+    printf("[%s] DEBUG: ", timestamp);
+    vprintf(format, args);
+    printf("\n");
+    fflush(stdout);  // Ensure output is written immediately
+    va_end(args);
+}
+
+int main() {
+    logDebug("Starting Game Dashboard initialization...");
+    
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIGHDPI);
+    logDebug("Config flags set");
+    
+    InitWindow(1280, 720, "Game Dashboard");
+    logDebug("Window initialized");
+    SetTargetFPS(TARGET_FPS);
+    
+    // Create physics world
     b2WorldDef worldDef = b2DefaultWorldDef();
     worldDef.gravity = (b2Vec2){0.0f, 0.0f};
+    worldDef.enableSleep = false;
     b2WorldId worldId = b2CreateWorld(&worldDef);
+    logDebug("Physics world created: %d", worldId);
 
-    // Simulation parameters
-    float timeStep = 1.0f / 60.0f;
-    int subStepCount = 8;
-
-    // Initialize camera with ship counter
-    Camera2DState camera = {
-        .target = {0, 0},
-        .zoom = 1.0f,
-        .offset = {0, 0},
-        .isDragging = false,
-        .shipsCreated = 0,
-        .isPlacingShip = false,
-        .placementPreview = (Vector2){0, 0},
-        .ships = {NULL, 0, 0}
-    };
+    // Initialize camera and ships
+    Camera2DState camera = {0};
+    camera.zoom = 1.0f;
     initShipArray(&camera.ships, 10);
+    logDebug("Camera and ship array initialized");
 
-    // Create GUI buttons
-    GuiButton createShipButton = CreateButton(10, 150, 200, 40, "Create Ship", SKYBLUE);
+    // Initialize admin console
+    AdminConsole adminConsole;
+    initAdminConsole(&adminConsole, worldId, &camera.ships);
+    logDebug("Admin console initialized");
+    startAdminConsoleThread(&adminConsole);
+    logDebug("Admin console thread started");
 
-    // Initialize network server
-    NetworkServer server;
-    if (!initServer(&server)) {
-        return -1;
-    }
+    // Initialize admin window
+    AdminWindow adminWindow;
+    initAdminWindow(&adminWindow, worldId, &camera.ships, &camera);
+    logDebug("Admin window initialized");
+
+    double lastPhysicsUpdate = GetTime();
+    double lastVisualUpdate = GetTime();
+    Vector2 lastCameraOffset = {0};
+    float lastCameraZoom = 1.0f;
     
-    // Main game loop
+    logDebug("Entering main loop");
+    int frameCount = 0;
+    double lastFrameTime = GetTime();
+    
     while (!WindowShouldClose()) {
-        // Accept any new clients
-        acceptNewClients(&server);
+        double currentTime = GetTime();
+        frameCount++;
         
-        // Handle network messages
-        handleNetworkMessages(&server, worldId, &camera);
+        // Log performance stats every 5 seconds
+        if (currentTime - lastFrameTime >= 5.0) {
+            double fps = frameCount / (currentTime - lastFrameTime);
+            logDebug("FPS: %.1f, Ships: %d, Camera zoom: %.2f", 
+                    fps, camera.ships.count, camera.zoom);
+            frameCount = 0;
+            lastFrameTime = currentTime;
+        }
 
-        // Update camera
+        // Log any significant state changes
+        if (camera.zoom != lastCameraZoom) {
+            logDebug("Camera zoom changed: %.2f -> %.2f", lastCameraZoom, camera.zoom);
+            lastCameraZoom = camera.zoom;
+        }
+
         UpdateGameCamera(&camera);
 
-        // Handle ship placement
-        if (GuiButtonUpdate(&createShipButton)) {
-            camera.isPlacingShip = true;
+        // Physics updates
+        if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
+            b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
+            lastPhysicsUpdate = currentTime;
         }
-
-        // Update ship placement preview
-        if (camera.isPlacingShip) {
-            camera.placementPreview = GetMousePosition();
-            
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                if (!CheckCollisionPointRec(camera.placementPreview, createShipButton.bounds)) {
-                    b2Vec2 physicsPos = screenToPhysics(camera.placementPreview, &camera);
-                    b2BodyId newShipId = createShipHull(worldId, physicsPos.x, physicsPos.y, b2MakeRot(0.0f));
-                    
-                    Ship newShip = {
-                        .id = newShipId,
-                        .screenPos = camera.placementPreview,
-                        .physicsPos = physicsPos
-                    };
-                    addShip(&camera.ships, newShip);
-                    
-                    camera.shipsCreated++;
-                    camera.isPlacingShip = false;
-                    
-                    printf("Ship created (#%d):\n", camera.shipsCreated);
-                    printf("  Screen pos: (%.2f, %.2f)\n", camera.placementPreview.x, camera.placementPreview.y);
-                    printf("  Physics pos: (%.2f, %.2f)\n", physicsPos.x, physicsPos.y);
-                    printf("  Body ID: %d\n", newShipId.index1);
-                }
-            }
-            else if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
-                camera.isPlacingShip = false;
-            }
-        }
-
-        // Update physics
-        b2World_Step(worldId, timeStep, subStepCount);
-
-        // Broadcast world state to clients
-        broadcastWorldState(&server, &camera);
 
         BeginDrawing();
         ClearBackground(RAYWHITE);
-
-        // Draw grid
-        DrawPhysicsGrid(PIXELS_PER_METER, &camera);
         
-        // Draw all ships
-        updateShipPositions(worldId, &camera);
-
-        // Draw UI elements
-        DrawFPS(10, 10);
-        DrawText(TextFormat("Zoom: %.2f", camera.zoom), 10, 110, 20, DARKGRAY);
-        DrawText("Controls:", 10, 130, 20, DARKGRAY);
-        DrawText(TextFormat("Ships Created: %d", camera.shipsCreated), 10, 200, 20, DARKGRAY);
-
-        // Draw placement preview
-        if (camera.isPlacingShip) {
-            DrawShipHull(camera.placementPreview, 0.0f, Fade(GREEN, 0.5f), &camera);
-            DrawText("Click to place ship, right click to cancel", 10, 220, 20, DARKGRAY);
-        }
-
-        // Draw ship coordinates
+        // Draw grid first (background layer)
+        DrawPhysicsGrid(50.0f, &camera);
+        
+        // Draw UI elements that should be behind ships
+        DrawText("Server Dashboard", 10, 10, 20, BLACK);
+        
+        // Draw ships on top of grid
         for (int i = 0; i < camera.ships.count; i++) {
             Ship* ship = &camera.ships.ships[i];
-            DrawText(TextFormat("Ship %d: Screen(%.1f, %.1f) Physics(%.1f, %.1f)",
-                i + 1,
-                ship->screenPos.x,
-                ship->screenPos.y,
-                ship->physicsPos.x,
-                ship->physicsPos.y),
-                10, 240 + i * 20, 20, DARKGRAY);
+            if (b2Body_IsValid(ship->id)) {
+                b2Vec2 pos = b2Body_GetPosition(ship->id);
+                b2Rot rot = b2Body_GetRotation(ship->id);
+                ship->physicsPos = pos;
+                ship->screenPos = physicsToScreen(pos, &camera);
+                float angle = atan2f(rot.s, rot.c);
+                
+                // Add debug output for ship positions
+                logDebug("Drawing ship at screen pos=(%.2f, %.2f) physics pos=(%.2f, %.2f)", 
+                        ship->screenPos.x, ship->screenPos.y, pos.x, pos.y);
+                        
+                DrawShipHull(ship->screenPos, angle, BLUE, &camera);
+            }
         }
-
+        
+        // Draw admin panel last (top layer)
+        if (adminWindow.isOpen) {
+            updateAdminWindow(&adminWindow);
+        }
+        
         EndDrawing();
+        
+        // Handle input outside of drawing
+        if (IsKeyPressed(KEY_TAB)) {
+            adminWindow.isOpen = !adminWindow.isOpen;
+        }
     }
 
-    // Cleanup
-    cleanupServer(&server);
+    logDebug("Cleaning up...");
+    closeAdminWindow(&adminWindow);
+    stopAdminConsole(&adminConsole);
     b2DestroyWorld(worldId);
-    free(camera.ships.ships);
     CloseWindow();
+    logDebug("Shutdown complete");
+    
     return 0;
 }

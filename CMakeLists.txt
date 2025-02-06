@@ -3,17 +3,9 @@ project(PGGameServer C)
 
 set(CMAKE_C_STANDARD 11)
 
-# Look for Box2D in standard locations
+# Find Box2D
 find_library(BOX2D_LIBRARY NAMES box2d_3 box2d libbox2d)
 find_path(BOX2D_INCLUDE_DIR box2d/box2d.h)
-
-if(NOT BOX2D_LIBRARY OR NOT BOX2D_INCLUDE_DIR)
-    message(FATAL_ERROR "Box2D 3.0 not found. Please build and install Box2D 3.0 from source:\n"
-            "git clone https://github.com/erincatto/box2d.git\n"
-            "cd box2d && mkdir build && cd build\n"
-            "cmake .. -DBOX2D_BUILD_SHARED=ON -DBOX2D_BUILD_STATIC=OFF\n"
-            "make && sudo make install")
-endif()
 
 # Find raylib
 find_package(raylib QUIET)
@@ -26,36 +18,57 @@ if (NOT raylib_FOUND)
     FetchContent_MakeAvailable(raylib)
 endif()
 
-# Find CURL
-find_package(CURL REQUIRED)
+# Add optimization flags
+set(CMAKE_C_FLAGS_RELEASE "-O3 -march=native -flto")
+set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-O3")
 
-# Find JSON-C
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(JSONC REQUIRED json-c)
+# Add Nuklear
+include_directories(${CMAKE_SOURCE_DIR}/external)
 
-# Find libwebsockets
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBWEBSOCKETS REQUIRED libwebsockets)
-
-# Add executable with both main.c and network.c
-add_executable(box2d_hello 
+# Create basic game dashboard executable
+add_executable(game_dashboard 
     main.c
-    network.c
+    ship_shapes.c
+    admin_console.c
+    admin_window.c
+    coord_utils.c
+    external/nuklear_raylib.c
 )
 
-# Include and link Box2D, raylib, CURL, JSON-C, and libwebsockets
-target_include_directories(box2d_hello PRIVATE 
+target_include_directories(game_dashboard PRIVATE 
     ${BOX2D_INCLUDE_DIR}
-    ${RAYLIB_INCLUDE_DIRS}
-    ${CURL_INCLUDE_DIRS}
-    ${JSONC_INCLUDE_DIRS}
-    ${LIBWEBSOCKETS_INCLUDE_DIRS}
 )
-target_link_libraries(box2d_hello PRIVATE
+
+target_link_libraries(game_dashboard PRIVATE
     ${BOX2D_LIBRARY}
     raylib
-    ${CURL_LIBRARIES}
-    ${JSONC_LIBRARIES}
-    ${LIBWEBSOCKETS_LIBRARIES}
     m
+    pthread
 )
+
+# Add optimization flags to release build
+target_compile_options(game_dashboard PRIVATE -O3 -march=native -flto)
+
+# Add debug build
+add_executable(game_dashboard_debug 
+    main.c
+    ship_shapes.c
+    admin_console.c
+    admin_window.c
+    coord_utils.c
+    external/nuklear_raylib.c
+)
+
+target_include_directories(game_dashboard_debug PRIVATE 
+    ${BOX2D_INCLUDE_DIR}
+)
+
+target_link_libraries(game_dashboard_debug PRIVATE
+    ${BOX2D_LIBRARY}
+    raylib
+    m
+    pthread
+)
+
+# Debug configuration
+target_compile_options(game_dashboard_debug PRIVATE -g -O0)
