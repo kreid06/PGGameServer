@@ -252,10 +252,25 @@ int main() {
         
         UpdateGameCamera(&camera);
 
-        // Physics updates
+        // Physics updates at 60Hz
         if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
             b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
             lastPhysicsUpdate = currentTime;
+        }
+
+        // Only update visuals at 1Hz
+        bool shouldUpdateVisuals = (currentTime - lastVisualUpdate >= VISUAL_TIME_STEP);
+        
+        if (shouldUpdateVisuals) {
+            // Update cached positions
+            for (int i = 0; i < camera.ships.count; i++) {
+                Ship* ship = &camera.ships.ships[i];
+                if (b2Body_IsValid(ship->id)) {
+                    ship->physicsPos = b2Body_GetPosition(ship->id);
+                    ship->screenPos = physicsToScreen(ship->physicsPos, &camera);
+                }
+            }
+            lastVisualUpdate = currentTime;
         }
 
         BeginDrawing();
@@ -264,14 +279,11 @@ int main() {
         DrawPhysicsGrid(50.0f, &camera);
         DrawText("Server Dashboard", 10, 10, 20, BLACK);
         
-        // Draw ships
+        // Draw ships using cached positions
         for (int i = 0; i < camera.ships.count; i++) {
             Ship* ship = &camera.ships.ships[i];
             if (b2Body_IsValid(ship->id)) {
-                b2Vec2 pos = b2Body_GetPosition(ship->id);
                 b2Rot rot = b2Body_GetRotation(ship->id);
-                ship->physicsPos = pos;
-                ship->screenPos = physicsToScreen(pos, &camera);
                 float angle = atan2f(rot.s, rot.c);
                 DrawShipHull(ship->screenPos, angle, BLUE, &camera);
             }
