@@ -9,6 +9,15 @@
 #define METER_PER_PIXEL 0.1f       // Inverse of PIXELS_PER_METER
 #define SHIP_SCALE 4.0f            // Doubled from 2.0f to match physics size
 
+// Define ShipRenderState before it's used
+typedef struct {
+    Vector2 lastPos;
+    Vector2 currentPos;
+    float lastAngle;
+    float currentAngle;
+    double updateTime;
+} ShipRenderState;
+
 typedef struct {
     b2BodyId id;
     Vector2 screenPos;
@@ -17,6 +26,7 @@ typedef struct {
 
 typedef struct {
     Ship* ships;
+    ShipRenderState* renderStates;  // Add this field
     int capacity;
     int count;
 } ShipArray;

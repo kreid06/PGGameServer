@@ -121,19 +121,45 @@ void DrawPhysicsGrid(float spacing, const Camera2DState* camera) {
     DrawText("(0,0)", originX + 10, originY + 10, 20, RED);
 }
 
-// Add before main():
+// Add struct to store interpolation data
+
 void initShipArray(ShipArray* array, int initialCapacity) {
     array->ships = (Ship*)malloc(initialCapacity * sizeof(Ship));
+    array->renderStates = malloc(initialCapacity * sizeof(ShipRenderState));
     array->capacity = initialCapacity;
     array->count = 0;
+    
+    // Initialize render states
+    for (int i = 0; i < initialCapacity; i++) {
+        array->renderStates[i] = (ShipRenderState){
+            .lastPos = (Vector2){0, 0},
+            .currentPos = (Vector2){0, 0},
+            .lastAngle = 0,
+            .currentAngle = 0,
+            .updateTime = 0
+        };
+    }
 }
 
 void addShip(ShipArray* array, Ship ship) {
     if (array->count >= array->capacity) {
         array->capacity *= 2;
         array->ships = (Ship*)realloc(array->ships, array->capacity * sizeof(Ship));
+        array->renderStates = realloc(array->renderStates, 
+                                    array->capacity * sizeof(ShipRenderState));
     }
-    array->ships[array->count++] = ship;
+    array->ships[array->count] = ship;
+    
+    // Initialize render state
+    array->renderStates[array->count] = (ShipRenderState){
+        .lastPos = ship.screenPos,
+        .currentPos = ship.screenPos,
+        .lastAngle = 0,
+        .currentAngle = 0,
+        .updateTime = GetTime()
+    };
+    
+    array->count++;
 }
 
 // Add this function before main():
@@ -271,6 +297,31 @@ int main() {
             lastPhysicsUpdate = currentTime;
         }
 
+        // Visual update at 1Hz
+        if (currentTime - lastVisualUpdate >= VISUAL_TIME_STEP) {
+            for (int i = 0; i < camera.ships.count; i++) {
+                Ship* ship = &camera.ships.ships[i];
+                ShipRenderState* renderState = &camera.ships.renderStates[i];
+                
+                if (b2Body_IsValid(ship->id)) {
+                    // Store last position
+                    renderState->lastPos = renderState->currentPos;
+                    renderState->lastAngle = renderState->currentAngle;
+                    
+                    // Update to new position
+                    b2Vec2 pos = b2Body_GetPosition(ship->id);
+                    b2Rot rot = b2Body_GetRotation(ship->id);
+                    
+                    ship->physicsPos = pos;
+                    ship->screenPos = physicsToScreen(pos, &camera);
+                    renderState->currentPos = ship->screenPos;
+                    renderState->currentAngle = atan2f(rot.s, rot.c);
+                    renderState->updateTime = currentTime;
+                }
+            }
+            lastVisualUpdate = currentTime;
+        }
+
         BeginDrawing();
         ClearBackground(RAYWHITE);
         
@@ -279,6 +330,28 @@ int main() {
         
         // Draw UI elements that should be behind ships
         DrawText("Server Dashboard", 10, 10, 20, BLACK);
+        
+        // Interpolate and draw ships
+        for (int i = 0; i < camera.ships.count; i++) {
+            Ship* ship = &camera.ships.ships[i];
+            ShipRenderState* renderState = &camera.ships.renderStates[i];
+            
+            if (b2Body_IsValid(ship->id)) {
+                // Calculate interpolation factor
+                float t = fminf(1.0f, (float)(currentTime - renderState->updateTime) / VISUAL_TIME_STEP);
+                
+                // Interpolate position and angle
+                Vector2 interpolatedPos = {
+                    renderState->lastPos.x + (renderState->currentPos.x - renderState->lastPos.x) * t,
+                    renderState->lastPos.y + (renderState->currentPos.y - renderState->lastPos.y) * t
+                };
+                
+                float interpolatedAngle = renderState->lastAngle + 
+                    (renderState->currentAngle - renderState->lastAngle) * t;
+                
+                DrawShipHull(interpolatedPos, interpolatedAngle, BLUE, &camera);
+            }
+        }
         
         // Draw ships on top of grid
         for (int i = 0; i < camera.ships.count; i++) {
