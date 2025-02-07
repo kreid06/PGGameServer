@@ -1,6 +1,21 @@
-# Build directory
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Build files
 build/
-client
+*.o
+*.out
+
+# IDE files
+.vscode/
+.idea/
+
+# Debug files
+*.log
+core.*
+
 # CMake files
 CMakeCache.txt
 CMakeFiles/
@@ -9,7 +24,3 @@ Makefile
 
 # Compiled binaries
 box2d_hello
-
-# IDE specific files
-.vscode/
-.idea/

@@ -3,6 +3,8 @@
 
 #include <raylib.h>
 #include <box2d/box2d.h>
+#include "db_client.h"    // Add this include for DatabaseClient
+#include "net_protocol.h" // Add this include for DatabaseHealth
 
 // Unified scale constants
 #define PIXELS_PER_METER 100.0f       // Screen pixels per physics meter
@@ -37,5 +39,12 @@ typedef struct {
     Vector2 placementPreview;
     ShipArray ships;
 } Camera2DState;
+
+typedef struct {
+    DatabaseClient dbClient;
+    DatabaseHealth dbHealth;
+    double lastHealthCheck;
+    bool isDbHealthy;
+} GameServer;
 
 #endif // GAME_STATE_H

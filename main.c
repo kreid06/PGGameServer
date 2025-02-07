@@ -4,12 +4,16 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include "ship_shapes.h"
+#include "db_client.h"
+#include "net_protocol.h"
 #include "game_state.h"
 #include <signal.h>
 #include "admin_console.h"
 #include "admin_window.h"
 #include <time.h>
 #include "coord_utils.h"
+#include "env_loader.h"
+#include <string.h>
 
 // Unified timing constants
 #define PHYSICS_UPDATE_HZ 60        // Physics runs at 60Hz
@@ -17,7 +21,7 @@
 #define TARGET_FPS 60               // Target 60 FPS
 #define PHYSICS_TIME_STEP (1.0f / PHYSICS_UPDATE_HZ)
 #define VISUAL_TIME_STEP (1.0f / VISUAL_UPDATE_HZ)
-
+#define DB_HEALTH_CHECK_INTERVAL 5.0  // Check every 5 seconds
 
 // Update game camera based on input
 void UpdateGameCamera(Camera2DState* camera) {
@@ -237,6 +241,39 @@ int main() {
     initAdminWindow(&adminWindow, worldId, &camera.ships, &camera);
     logDebug("Admin window initialized");
 
+    // Load environment variables
+    if (!loadEnvFile(".env")) {
+        logDebug("Warning: Failed to load .env file, falling back to environment variables");
+        // Check if we're in development mode
+        if (strcmp(getEnvOrDefault("ENV", "dev"), "production") == 0) {
+            logDebug("ERROR: Missing .env file in production mode");
+            return -1;
+        }
+    } else {
+        logDebug("Successfully loaded .env file");
+    }
+
+    // Get all required configuration from environment
+    const char* server_id = getEnvOrDefault("GAME_SERVER_ID", NULL);
+    const char* server_token = getEnvOrDefault("GAME_SERVER_TOKEN", NULL);
+    const char* auth_host = getEnvOrDefault("AUTH_SERVER_HOST", "localhost");
+    const char* auth_port_str = getEnvOrDefault("AUTH_SERVER_PORT", "3000");
+    int auth_port = atoi(auth_port_str);
+
+    if (!server_id || !server_token) {
+        logDebug("ERROR: Required environment variables GAME_SERVER_ID and GAME_SERVER_TOKEN must be set");
+        logDebug("Please copy .env.example to .env and configure with your credentials");
+        return -1;
+    }
+
+    // Initialize database client with credentials
+    GameServer server = {0};
+    if (!initDatabaseClient(&server.dbClient, auth_host, auth_port, server_id, server_token)) {
+        logDebug("Failed to initialize database client");
+        return -1;
+    }
+    logDebug("Database client initialized with server ID: %s", server_id);
+
     double lastPhysicsUpdate = GetTime();
     double lastVisualUpdate = GetTime();
     Vector2 lastCameraOffset = {0};
@@ -273,6 +310,23 @@ int main() {
             lastVisualUpdate = currentTime;
         }
 
+        // Database health check
+        if (currentTime - server.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL) {
+            bool prevHealth = server.isDbHealthy;
+            server.isDbHealthy = checkDatabaseHealth(&server.dbClient, &server.dbHealth);
+            
+            if (server.isDbHealthy) {
+                logDebug("DB Health: OK, Latency: %dms, Memory: %llu/%llu MB",
+                        server.dbHealth.db_latency,
+                        server.dbHealth.memory_used / (1024*1024),
+                        server.dbHealth.memory_total / (1024*1024));
+            } else if (prevHealth) {
+                logDebug("WARNING: Database connection lost!");
+            }
+            
+            server.lastHealthCheck = currentTime;
+        }
+
         BeginDrawing();
         ClearBackground(RAYWHITE);
         
@@ -298,6 +352,11 @@ int main() {
         if (adminWindow.isOpen) {
             updateAdminWindow(&adminWindow);
         }
+
+        // Draw database status indicator
+        DrawText(server.isDbHealthy ? "DB: OK" : "DB: ERROR",
+                10, GetScreenHeight() - 30, 20,
+                server.isDbHealthy ? GREEN : RED);
         
         EndDrawing();
         
@@ -320,6 +379,7 @@ int main() {
     logDebug("Cleaning up...");
     closeAdminWindow(&adminWindow);
     stopAdminConsole(&adminConsole);
+    cleanupDatabaseClient(&server.dbClient);
     b2DestroyWorld(worldId);
     CloseWindow();
     logDebug("Shutdown complete");

@@ -1,9 +1,12 @@
 #ifndef SHIP_SHAPES_H
 #define SHIP_SHAPES_H
 
-#include <box2d/box2d.h>
 #include <raylib.h>
+#include <box2d/box2d.h>
 #include "game_state.h"
+
+// Forward declare GameServer to avoid circular dependency
+struct GameServer;
 
 // Helper function for ship drawing
 Vector2 TransformPoint(Vector2 p, float angle, float zoom, Vector2 center);

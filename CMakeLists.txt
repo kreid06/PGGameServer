@@ -18,6 +18,10 @@ if (NOT raylib_FOUND)
     FetchContent_MakeAvailable(raylib)
 endif()
 
+# Add curl dependency
+find_package(CURL REQUIRED)
+include_directories(${CURL_INCLUDE_DIRS})
+
 # Add optimization flags
 set(CMAKE_C_FLAGS_RELEASE "-O3 -march=native -flto")
 set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-O3")
@@ -33,6 +37,9 @@ add_executable(game_dashboard
     admin_window.c
     coord_utils.c
     external/nuklear_raylib.c
+    db_client.c
+    net_protocol.c
+    env_loader.c
 )
 
 target_include_directories(game_dashboard PRIVATE 
@@ -44,6 +51,7 @@ target_link_libraries(game_dashboard PRIVATE
     raylib
     m
     pthread
+    ${CURL_LIBRARIES}
 )
 
 # Add optimization flags to release build
@@ -57,6 +65,9 @@ add_executable(game_dashboard_debug
     admin_window.c
     coord_utils.c
     external/nuklear_raylib.c
+    db_client.c
+    net_protocol.c
+    env_loader
 )
 
 target_include_directories(game_dashboard_debug PRIVATE 
@@ -68,6 +79,7 @@ target_link_libraries(game_dashboard_debug PRIVATE
     raylib
     m
     pthread
+    ${CURL_LIBRARIES}
 )
 
 # Debug configuration
