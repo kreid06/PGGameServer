@@ -125,40 +125,16 @@ void DrawPhysicsGrid(float spacing, const Camera2DState* camera) {
 
 void initShipArray(ShipArray* array, int initialCapacity) {
     array->ships = (Ship*)malloc(initialCapacity * sizeof(Ship));
-    array->renderStates = malloc(initialCapacity * sizeof(ShipRenderState));
     array->capacity = initialCapacity;
     array->count = 0;
-    
-    // Initialize render states
-    for (int i = 0; i < initialCapacity; i++) {
-        array->renderStates[i] = (ShipRenderState){
-            .lastPos = (Vector2){0, 0},
-            .currentPos = (Vector2){0, 0},
-            .lastAngle = 0,
-            .currentAngle = 0,
-            .updateTime = 0
-        };
-    }
 }
 
 void addShip(ShipArray* array, Ship ship) {
     if (array->count >= array->capacity) {
         array->capacity *= 2;
         array->ships = (Ship*)realloc(array->ships, array->capacity * sizeof(Ship));
-        array->renderStates = realloc(array->renderStates, 
-                                    array->capacity * sizeof(ShipRenderState));
     }
     array->ships[array->count] = ship;
-    
-    // Initialize render state
-    array->renderStates[array->count] = (ShipRenderState){
-        .lastPos = ship.screenPos,
-        .currentPos = ship.screenPos,
-        .lastAngle = 0,
-        .currentAngle = 0,
-        .updateTime = GetTime()
-    };
-    
     array->count++;
 }
 
@@ -274,7 +250,46 @@ int main() {
         double currentTime = GetTime();
         frameCount++;
         
-        // Log performance stats every 5 seconds
+        UpdateGameCamera(&camera);
+
+        // Physics updates
+        if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
+            b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
+            lastPhysicsUpdate = currentTime;
+        }
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        
+        DrawPhysicsGrid(50.0f, &camera);
+        DrawText("Server Dashboard", 10, 10, 20, BLACK);
+        
+        // Draw ships
+        for (int i = 0; i < camera.ships.count; i++) {
+            Ship* ship = &camera.ships.ships[i];
+            if (b2Body_IsValid(ship->id)) {
+                b2Vec2 pos = b2Body_GetPosition(ship->id);
+                b2Rot rot = b2Body_GetRotation(ship->id);
+                ship->physicsPos = pos;
+                ship->screenPos = physicsToScreen(pos, &camera);
+                float angle = atan2f(rot.s, rot.c);
+                DrawShipHull(ship->screenPos, angle, BLUE, &camera);
+            }
+        }
+        
+        // Update and draw admin panel
+        if (IsKeyPressed(KEY_TAB)) {
+            adminWindow.isOpen = !adminWindow.isOpen;
+            logDebug("Admin panel visibility toggled: %d", adminWindow.isOpen);
+        }
+
+        if (adminWindow.isOpen) {
+            updateAdminWindow(&adminWindow);
+        }
+        
+        EndDrawing();
+        
+        // Log performance stats
         if (currentTime - lastFrameTime >= 5.0) {
             double fps = frameCount / (currentTime - lastFrameTime);
             logDebug("FPS: %.1f, Ships: %d, Camera zoom: %.2f", 
@@ -287,100 +302,6 @@ int main() {
         if (camera.zoom != lastCameraZoom) {
             logDebug("Camera zoom changed: %.2f -> %.2f", lastCameraZoom, camera.zoom);
             lastCameraZoom = camera.zoom;
-        }
-
-        UpdateGameCamera(&camera);
-
-        // Physics updates
-        if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
-            b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
-            lastPhysicsUpdate = currentTime;
-        }
-
-        // Visual update at 1Hz
-        if (currentTime - lastVisualUpdate >= VISUAL_TIME_STEP) {
-            for (int i = 0; i < camera.ships.count; i++) {
-                Ship* ship = &camera.ships.ships[i];
-                ShipRenderState* renderState = &camera.ships.renderStates[i];
-                
-                if (b2Body_IsValid(ship->id)) {
-                    // Store last position
-                    renderState->lastPos = renderState->currentPos;
-                    renderState->lastAngle = renderState->currentAngle;
-                    
-                    // Update to new position
-                    b2Vec2 pos = b2Body_GetPosition(ship->id);
-                    b2Rot rot = b2Body_GetRotation(ship->id);
-                    
-                    ship->physicsPos = pos;
-                    ship->screenPos = physicsToScreen(pos, &camera);
-                    renderState->currentPos = ship->screenPos;
-                    renderState->currentAngle = atan2f(rot.s, rot.c);
-                    renderState->updateTime = currentTime;
-                }
-            }
-            lastVisualUpdate = currentTime;
-        }
-
-        BeginDrawing();
-        ClearBackground(RAYWHITE);
-        
-        // Draw grid first (background layer)
-        DrawPhysicsGrid(50.0f, &camera);
-        
-        // Draw UI elements that should be behind ships
-        DrawText("Server Dashboard", 10, 10, 20, BLACK);
-        
-        // Interpolate and draw ships
-        for (int i = 0; i < camera.ships.count; i++) {
-            Ship* ship = &camera.ships.ships[i];
-            ShipRenderState* renderState = &camera.ships.renderStates[i];
-            
-            if (b2Body_IsValid(ship->id)) {
-                // Calculate interpolation factor
-                float t = fminf(1.0f, (float)(currentTime - renderState->updateTime) / VISUAL_TIME_STEP);
-                
-                // Interpolate position and angle
-                Vector2 interpolatedPos = {
-                    renderState->lastPos.x + (renderState->currentPos.x - renderState->lastPos.x) * t,
-                    renderState->lastPos.y + (renderState->currentPos.y - renderState->lastPos.y) * t
-                };
-                
-                float interpolatedAngle = renderState->lastAngle + 
-                    (renderState->currentAngle - renderState->lastAngle) * t;
-                
-                DrawShipHull(interpolatedPos, interpolatedAngle, BLUE, &camera);
-            }
-        }
-        
-        // Draw ships on top of grid
-        for (int i = 0; i < camera.ships.count; i++) {
-            Ship* ship = &camera.ships.ships[i];
-            if (b2Body_IsValid(ship->id)) {
-                b2Vec2 pos = b2Body_GetPosition(ship->id);
-                b2Rot rot = b2Body_GetRotation(ship->id);
-                ship->physicsPos = pos;
-                ship->screenPos = physicsToScreen(pos, &camera);
-                float angle = atan2f(rot.s, rot.c);
-                
-                // Add debug output for ship positions
-                logDebug("Drawing ship at screen pos=(%.2f, %.2f) physics pos=(%.2f, %.2f)", 
-                        ship->screenPos.x, ship->screenPos.y, pos.x, pos.y);
-                        
-                DrawShipHull(ship->screenPos, angle, BLUE, &camera);
-            }
-        }
-        
-        // Draw admin panel last (top layer)
-        if (adminWindow.isOpen) {
-            updateAdminWindow(&adminWindow);
-        }
-        
-        EndDrawing();
-        
-        // Handle input outside of drawing
-        if (IsKeyPressed(KEY_TAB)) {
-            adminWindow.isOpen = !adminWindow.isOpen;
         }
     }
 

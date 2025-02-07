@@ -86,8 +86,10 @@ void updateAdminWindow(AdminWindow* admin) {
     nk_raylib_input_begin();
     
     struct nk_rect bounds = nk_rect(
-        GetScreenWidth() - 400, 0, 
-        400, GetScreenHeight()
+        GetScreenWidth() - 300,  // Reduced width to 300
+        0, 
+        300,                     // Fixed width of 300
+        GetScreenHeight()
     );
     
     if (!nk_begin(admin->ctx, "Admin Panel", bounds,

@@ -4,19 +4,15 @@
 #include <raylib.h>
 #include <box2d/box2d.h>
 
-// Global scale constants
-#define PIXELS_PER_METER 10.0f     // Reduced from 100.0f for more manageable scaling
-#define METER_PER_PIXEL 0.1f       // Inverse of PIXELS_PER_METER
-#define SHIP_SCALE 4.0f            // Doubled from 2.0f to match physics size
+// Unified scale constants
+#define PIXELS_PER_METER 100.0f       // Screen pixels per physics meter
+#define METERS_PER_PIXEL (1.0f/PIXELS_PER_METER)
+#define VISUAL_SCALE_FACTOR 0.65f      // Visual ship scale
+#define PHYSICS_SCALE_FACTOR 0.01f    // Physics scale
 
-// Define ShipRenderState before it's used
-typedef struct {
-    Vector2 lastPos;
-    Vector2 currentPos;
-    float lastAngle;
-    float currentAngle;
-    double updateTime;
-} ShipRenderState;
+// Ship dimensions
+#define PHYSICS_SHIP_LENGTH 4.5f      // Length of ship in meters
+#define PHYSICS_SHIP_WIDTH 1.8f       // Width of ship in meters
 
 typedef struct {
     b2BodyId id;
@@ -26,7 +22,6 @@ typedef struct {
 
 typedef struct {
     Ship* ships;
-    ShipRenderState* renderStates;  // Add this field
     int capacity;
     int count;
 } ShipArray;

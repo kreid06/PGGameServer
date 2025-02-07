@@ -3,9 +3,10 @@
 #include <raylib.h>
 #include "game_state.h"
 #include "coord_utils.h"
+#include <stdlib.h>
 
 #define CURVE_SEGMENTS 20
-#define CANVAS_TO_PHYSICS (SHIP_SCALE / 500.0f)
+// Remove CANVAS_TO_PHYSICS and SHIP_SCALE references
 #define b2_maxPolygonVertices 8
 #define MIN_VERTEX_DISTANCE 0.01f   // Minimum distance between vertices
 
@@ -29,44 +30,117 @@ Vector2 QuadraticBezier(Vector2 p0, Vector2 p1, Vector2 p2, float t) {
 }
 
 void DrawShipHull(Vector2 center, float angle, Color color, const Camera2DState* camera) {
-    // Ship points in physics scale - doubled size
-    const float WIDTH = 4.0f * SHIP_SCALE;    // Doubled from 2.0f
-    const float LENGTH = 8.0f * SHIP_SCALE;   // Doubled from 4.0f
-    
-    Vector2 points[] = {
-        {LENGTH/2, 0},             // Bow
-        {LENGTH/3, WIDTH/2},       // Starboard bow - adjusted curve
-        {-LENGTH/3, WIDTH/2},      // Starboard quarter - adjusted curve
-        {-LENGTH/2, WIDTH/4},      // Stern starboard
-        {-LENGTH/2, -WIDTH/4},     // Stern port
-        {-LENGTH/3, -WIDTH/2},     // Port quarter - adjusted curve
-        {LENGTH/3, -WIDTH/2},      // Port bow - adjusted curve
-    };
-    
-    const int NUM_POINTS = sizeof(points)/sizeof(points[0]);
-    Vector2 transformed[NUM_POINTS + 1];  // +1 for closing the shape
-    
-    // Transform all points to screen space
-    for (int i = 0; i < NUM_POINTS; i++) {
-        transformed[i] = TransformPoint(points[i], angle, camera->zoom, center);
+    // Define visual shape points precisely matching the path
+    const float VISUAL_BOW_X = 225 * VISUAL_SCALE_FACTOR;
+    const float VISUAL_BOW_Y = 90 * VISUAL_SCALE_FACTOR;
+    const float VISUAL_CONTROL_X = 500 * VISUAL_SCALE_FACTOR;
+    const float VISUAL_STERN_X = -225 * VISUAL_SCALE_FACTOR;
+    const float VISUAL_STERN_CONTROL_X = -325 * VISUAL_SCALE_FACTOR;
+
+    // Draw physics box first if F1 is pressed
+    if (IsKeyDown(KEY_F1)) {
+        // Center point
+        DrawCircleV(center, 4.0f, RED);
+        
+        // Draw the actual physics box using PHYSICS_SHIP_LENGTH and PHYSICS_SHIP_WIDTH
+        float halfLength = (PHYSICS_SHIP_LENGTH * 0.5f) * PIXELS_PER_METER * camera->zoom;
+        float halfWidth = (PHYSICS_SHIP_WIDTH * 0.5f) * PIXELS_PER_METER * camera->zoom;
+        
+        // Define the four corners of the physics box
+        Vector2 corners[4] = {
+            (Vector2){ halfLength,  halfWidth},  // Top right
+            (Vector2){-halfLength,  halfWidth},  // Top left
+            (Vector2){-halfLength, -halfWidth},  // Bottom left
+            (Vector2){ halfLength, -halfWidth}   // Bottom right
+        };
+        
+        // Transform and draw the physics box
+        for (int i = 0; i < 4; i++) {
+            Vector2 start = TransformPoint(corners[i], angle, 1.0f, center);
+            Vector2 end = TransformPoint(corners[(i + 1) % 4], angle, 1.0f, center);
+            DrawLineEx(start, end, 2.0f, YELLOW);
+        }
+        
+        // Draw physics axes
+        Vector2 xAxis = TransformPoint((Vector2){halfLength, 0}, angle, 1.0f, center);
+        Vector2 yAxis = TransformPoint((Vector2){0, halfWidth}, angle, 1.0f, center);
+        DrawLineEx(center, xAxis, 2.0f, RED);    // X axis in red
+        DrawLineEx(center, yAxis, 2.0f, GREEN);  // Y axis in green
     }
-    transformed[NUM_POINTS] = transformed[0];  // Close the shape
-    
-    // Draw filled ship
-    DrawTriangleFan(transformed, NUM_POINTS, Fade(color, 0.3f));
-    
-    // Draw outline
-    for (int i = 0; i < NUM_POINTS; i++) {
-        DrawLineEx(transformed[i], transformed[(i + 1) % NUM_POINTS], 2.0f, color);
+
+    // Create points array following exact path description
+    Vector2 curvePoints[CURVE_SEGMENTS + 1];
+    int pointIndex = 0;
+
+    // 1. Start at (225, 90)
+    curvePoints[pointIndex++] = (Vector2){VISUAL_BOW_X, VISUAL_BOW_Y};
+
+    // 2. Quadratic curve to (225, -90) with control point (500, 0)
+    for (int i = 0; i <= CURVE_SEGMENTS/4; i++) {
+        float t = i / (float)(CURVE_SEGMENTS/4);
+        curvePoints[pointIndex++] = QuadraticBezier(
+            (Vector2){VISUAL_BOW_X, VISUAL_BOW_Y},      // Start (225, 90)
+            (Vector2){VISUAL_CONTROL_X, 0},             // Control (500, 0)
+            (Vector2){VISUAL_BOW_X, -VISUAL_BOW_Y},     // End (225, -90)
+            t
+        );
     }
+
+    // 3. Straight line to (-225, -90)
+    curvePoints[pointIndex++] = (Vector2){VISUAL_STERN_X, -VISUAL_BOW_Y};
+
+    // 4. Quadratic curve to (-225, 90) with control point (-325, 0)
+    for (int i = 0; i <= CURVE_SEGMENTS/4; i++) {
+        float t = i / (float)(CURVE_SEGMENTS/4);
+        curvePoints[pointIndex++] = QuadraticBezier(
+            (Vector2){VISUAL_STERN_X, -VISUAL_BOW_Y},   // Start (-225, -90)
+            (Vector2){VISUAL_STERN_CONTROL_X, 0},       // Control (-325, 0)
+            (Vector2){VISUAL_STERN_X, VISUAL_BOW_Y},    // End (-225, 90)
+            t
+        );
+    }
+
+    // 5. Straight line back to start
+    curvePoints[pointIndex++] = (Vector2){VISUAL_BOW_X, VISUAL_BOW_Y};
+
+    // Transform and draw shape
+    Vector2* transformed = malloc(pointIndex * sizeof(Vector2));
+    for (int i = 0; i < pointIndex; i++) {
+        transformed[i] = TransformPoint(curvePoints[i], angle, camera->zoom, center);
+    }
+
+    // Draw filled shape and outline
+    DrawTriangleFan(transformed, pointIndex, Fade(color, 0.3f));
+    for (int i = 0; i < pointIndex - 1; i++) {
+        DrawLineEx(transformed[i], transformed[i + 1], 2.0f, color);
+    }
+
+    // Draw alignment vectors
+    float axisLength = 50.0f * camera->zoom;
+    // X axis (ship's forward direction) - RED
+    Vector2 xAxis = TransformPoint((Vector2){axisLength, 0}, angle, 1.0f, center);
+    DrawLineEx(center, xAxis, 2.0f, RED);
     
-    // Draw bow indicator (direction)
-    Vector2 bowTip = transformed[0];
-    Vector2 bowBase = {
-        (transformed[1].x + transformed[6].x) / 2,
-        (transformed[1].y + transformed[6].y) / 2
-    };
-    DrawLineEx(bowBase, bowTip, 3.0f, RED);
+    // Y axis (ship's side direction) - GREEN
+    Vector2 yAxis = TransformPoint((Vector2){0, axisLength}, angle, 1.0f, center);
+    DrawLineEx(center, yAxis, 2.0f, GREEN);
+
+    // Draw key points for debugging
+    if (IsKeyDown(KEY_F1)) {
+        // Draw control points
+        Vector2 controlPoint1 = TransformPoint((Vector2){VISUAL_CONTROL_X, 0}, angle, camera->zoom, center);
+        Vector2 controlPoint2 = TransformPoint((Vector2){VISUAL_STERN_CONTROL_X, 0}, angle, camera->zoom, center);
+        DrawCircleV(controlPoint1, 4.0f, YELLOW);
+        DrawCircleV(controlPoint2, 4.0f, YELLOW);
+        
+        // Draw key vertices
+        Vector2 bowPoint = TransformPoint((Vector2){VISUAL_BOW_X, 0}, angle, camera->zoom, center);
+        Vector2 sternPoint = TransformPoint((Vector2){VISUAL_STERN_X, 0}, angle, camera->zoom, center);
+        DrawCircleV(bowPoint, 4.0f, BLUE);
+        DrawCircleV(sternPoint, 4.0f, BLUE);
+    }
+
+    free(transformed);
 }
 
 // Add hull validation helpers
@@ -98,7 +172,7 @@ static bool checkSelfIntersection(const b2Hull* hull) {
             b2Vec2 p4 = hull->points[j2];
             
             // Check line segments for intersection
-            b2Vec2 r = {p2.x - p1.x, p2.y - p1.y};
+            b2Vec2 r = {p2.x - p1.x, p2.y - p3.y};
             b2Vec2 s = {p4.x - p3.x, p4.y - p3.y};
             float rxs = crossProduct2D(r, s);
             
@@ -154,26 +228,26 @@ bool validateHull(const b2Hull* hull) {
 }
 
 b2Hull createShipHullShape(void) {
-    // Define ship shape in meters with doubled size
-    const float BOW_LENGTH = 4.0f * SHIP_SCALE;   // Doubled from 2.0f
-    const float BEAM_WIDTH = 2.0f * SHIP_SCALE;   // Doubled from 1.0f
-    const float STERN_WIDTH = 3.0f * SHIP_SCALE;  // Doubled from 1.5f
+    // Use PHYSICS_SCALE_FACTOR instead of SHIP_SCALE
+    const float BOW_LENGTH = 4.0f;   // Base length
+    const float BEAM_WIDTH = 2.0f;   // Base width
+    const float STERN_WIDTH = 3.0f;  // Base stern width
     
-    logDebug("Creating ship hull with scale %f", SHIP_SCALE);
+    logDebug("Creating ship hull with physics scale %f", PHYSICS_SCALE_FACTOR);
     
-    // Create simplified but larger hull shape
+    // Create hull shape
     b2Hull hull;
     hull.count = 8;
     
-    // Define points in counter-clockwise order
-    hull.points[0] = (b2Vec2){ BOW_LENGTH,  0.0f};             // Bow tip
-    hull.points[1] = (b2Vec2){ BOW_LENGTH/2,  BEAM_WIDTH/2};   // Starboard bow
-    hull.points[2] = (b2Vec2){-BOW_LENGTH/2,  BEAM_WIDTH/2};   // Starboard midship
-    hull.points[3] = (b2Vec2){-BOW_LENGTH,    STERN_WIDTH/2};  // Starboard stern
-    hull.points[4] = (b2Vec2){-BOW_LENGTH,   -STERN_WIDTH/2};  // Port stern
-    hull.points[5] = (b2Vec2){-BOW_LENGTH/2, -BEAM_WIDTH/2};   // Port midship
-    hull.points[6] = (b2Vec2){ BOW_LENGTH/2, -BEAM_WIDTH/2};   // Port bow
-    hull.points[7] = (b2Vec2){ BOW_LENGTH,  0.0f};             // Back to bow
+    // Define points in counter-clockwise order, scaled by PHYSICS_SCALE_FACTOR
+    hull.points[0] = (b2Vec2){ BOW_LENGTH * PHYSICS_SCALE_FACTOR,  0.0f};
+    hull.points[1] = (b2Vec2){ BOW_LENGTH * 0.5f * PHYSICS_SCALE_FACTOR,  BEAM_WIDTH * 0.5f * PHYSICS_SCALE_FACTOR};
+    hull.points[2] = (b2Vec2){-BOW_LENGTH * 0.5f * PHYSICS_SCALE_FACTOR,  BEAM_WIDTH * 0.5f * PHYSICS_SCALE_FACTOR};
+    hull.points[3] = (b2Vec2){-BOW_LENGTH * PHYSICS_SCALE_FACTOR,    STERN_WIDTH * 0.5f * PHYSICS_SCALE_FACTOR};
+    hull.points[4] = (b2Vec2){-BOW_LENGTH * PHYSICS_SCALE_FACTOR,   -STERN_WIDTH * 0.5f * PHYSICS_SCALE_FACTOR};
+    hull.points[5] = (b2Vec2){-BOW_LENGTH * 0.5f * PHYSICS_SCALE_FACTOR, -BEAM_WIDTH * 0.5f * PHYSICS_SCALE_FACTOR};
+    hull.points[6] = (b2Vec2){ BOW_LENGTH * 0.5f * PHYSICS_SCALE_FACTOR, -BEAM_WIDTH * 0.5f * PHYSICS_SCALE_FACTOR};
+    hull.points[7] = (b2Vec2){ BOW_LENGTH * PHYSICS_SCALE_FACTOR,  0.0f};             // Back to bow
 
     // Log hull points
     for (int i = 0; i < hull.count; i++) {
@@ -195,7 +269,7 @@ b2Hull createShipHullShape(void) {
     if (!validateHull(&hull)) {
         logDebug("WARNING: Creating fallback triangle shape");
         hull.count = 3;
-        float size = SHIP_SCALE * 0.5f;
+        float size = PHYSICS_SCALE_FACTOR * 0.5f;
         hull.points[0] = (b2Vec2){ size,  0.0f};
         hull.points[1] = (b2Vec2){-size,  size};
         hull.points[2] = (b2Vec2){-size, -size};
@@ -215,7 +289,7 @@ b2BodyId createShipHull(b2WorldId worldId, float x, float y, b2Rot rotation) {
     b2BodyDef bodyDef = b2DefaultBodyDef();
     bodyDef.type = b2_dynamicBody;
     bodyDef.position = (b2Vec2){x, y};
-    bodyDef.rotation = rotation;
+    bodyDef.rotation = (b2Rot){1.0f, 0.0f};  // cos(0)=1, sin(0)=0
     bodyDef.linearDamping = 0.5f;     // Increased damping for more stable movement
     bodyDef.angularDamping = 0.7f;    // Increased angular damping
     bodyDef.gravityScale = 0.0f;      // No gravity effect
@@ -226,20 +300,15 @@ b2BodyId createShipHull(b2WorldId worldId, float x, float y, b2Rot rotation) {
         return b2_nullBodyId;
     }
     
-    b2Hull hull = createShipHullShape();
-    logDebug("Created hull with %d vertices", hull.count);
-    
-    // Increased vertex radius for more stable physics
-    float radius = 0.1f;
-    b2Polygon polygon = b2MakePolygon(&hull, radius);
-    logDebug("Created polygon with vertex radius %.3f", radius);
+    // Create a simple rectangular box for physics using b2MakeBox
+    b2Polygon box = b2MakeBox(PHYSICS_SHIP_LENGTH * 0.5f, PHYSICS_SHIP_WIDTH * 0.5f);
     
     b2ShapeDef shapeDef = b2DefaultShapeDef();
     shapeDef.density = 1.0f;
     shapeDef.friction = 0.3f;
     shapeDef.restitution = 0.2f;
     
-    b2ShapeId shapeId = b2CreatePolygonShape(bodyId, &shapeDef, &polygon);
+    b2ShapeId shapeId = b2CreatePolygonShape(bodyId, &shapeDef, &box);
     if (!b2Shape_IsValid(shapeId)) {
         logDebug("Failed to create polygon shape");
         b2DestroyBody(bodyId);
