@@ -3,12 +3,19 @@ project(PGGameServer C)
 
 set(CMAKE_C_STANDARD 11)
 
+# Core dependencies
+find_package(OpenSSL REQUIRED)
+if(NOT OPENSSL_FOUND)
+    message(FATAL_ERROR "OpenSSL not found. Install with: sudo apt-get install libssl-dev")
+endif()
+find_package(CURL REQUIRED)
+find_package(raylib QUIET)
+
 # Find Box2D
 find_library(BOX2D_LIBRARY NAMES box2d_3 box2d libbox2d)
 find_path(BOX2D_INCLUDE_DIR box2d/box2d.h)
 
-# Find raylib
-find_package(raylib QUIET)
+# Install raylib if not found
 if (NOT raylib_FOUND)
     include(FetchContent)
     FetchContent_Declare(
@@ -18,19 +25,19 @@ if (NOT raylib_FOUND)
     FetchContent_MakeAvailable(raylib)
 endif()
 
-# Add curl dependency
-find_package(CURL REQUIRED)
-include_directories(${CURL_INCLUDE_DIRS})
+# Include directories
+include_directories(
+    ${CMAKE_SOURCE_DIR}/external  # Nuklear
+    ${OPENSSL_INCLUDE_DIR}        # Changed from previous
+    ${CURL_INCLUDE_DIRS}
+)
 
-# Add optimization flags
+# Optimization flags
 set(CMAKE_C_FLAGS_RELEASE "-O3 -march=native -flto")
 set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-O3")
 
-# Add Nuklear
-include_directories(${CMAKE_SOURCE_DIR}/external)
-
-# Create basic game dashboard executable
-add_executable(game_dashboard 
+# Common source files
+set(COMMON_SOURCES
     main.c
     ship_shapes.c
     admin_console.c
@@ -40,47 +47,33 @@ add_executable(game_dashboard
     db_client.c
     net_protocol.c
     env_loader.c
+    websocket.c
 )
 
-target_include_directories(game_dashboard PRIVATE 
-    ${BOX2D_INCLUDE_DIR}
-)
-
+# Release build
+add_executable(game_dashboard ${COMMON_SOURCES})
+target_include_directories(game_dashboard PRIVATE ${BOX2D_INCLUDE_DIR})
 target_link_libraries(game_dashboard PRIVATE
     ${BOX2D_LIBRARY}
     raylib
     m
     pthread
     ${CURL_LIBRARIES}
+    ${OPENSSL_SSL_LIBRARIES}
+    ${OPENSSL_CRYPTO_LIBRARIES}
 )
-
-# Add optimization flags to release build
 target_compile_options(game_dashboard PRIVATE -O3 -march=native -flto)
 
-# Add debug build
-add_executable(game_dashboard_debug 
-    main.c
-    ship_shapes.c
-    admin_console.c
-    admin_window.c
-    coord_utils.c
-    external/nuklear_raylib.c
-    db_client.c
-    net_protocol.c
-    env_loader
-)
-
-target_include_directories(game_dashboard_debug PRIVATE 
-    ${BOX2D_INCLUDE_DIR}
-)
-
+# Debug build
+add_executable(game_dashboard_debug ${COMMON_SOURCES})
+target_include_directories(game_dashboard_debug PRIVATE ${BOX2D_INCLUDE_DIR})
 target_link_libraries(game_dashboard_debug PRIVATE
     ${BOX2D_LIBRARY}
     raylib
     m
     pthread
     ${CURL_LIBRARIES}
+    ${OPENSSL_SSL_LIBRARIES}
+    ${OPENSSL_CRYPTO_LIBRARIES}
 )
-
-# Debug configuration
 target_compile_options(game_dashboard_debug PRIVATE -g -O0)

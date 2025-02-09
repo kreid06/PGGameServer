@@ -24,3 +24,6 @@ Makefile
 
 # Compiled binaries
 box2d_hello
+
+authServer
+client

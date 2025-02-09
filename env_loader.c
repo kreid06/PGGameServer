@@ -4,6 +4,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <unistd.h>
+#include <limits.h>
 
 #define MAX_LINE_LENGTH 4096
 #define MAX_KEY_LENGTH 256
@@ -32,7 +34,14 @@ bool loadEnvFile(const char* filename) {
 
     FILE* file = fopen(filename, "r");
     if (!file) {
-        fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno));
+        fprintf(stderr, "Error opening %s: %s (cwd: ", filename, strerror(errno));
+        // Print current working directory for debugging
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd))) {
+            fprintf(stderr, "%s)\n", cwd);
+        } else {
+            fprintf(stderr, "unknown)\n");
+        }
         return false;
     }
 

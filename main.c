@@ -14,6 +14,8 @@
 #include "coord_utils.h"
 #include "env_loader.h"
 #include <string.h>
+#include <unistd.h>
+#include <limits.h>
 
 // Unified timing constants
 #define PHYSICS_UPDATE_HZ 60        // Physics runs at 60Hz
@@ -241,9 +243,39 @@ int main() {
     initAdminWindow(&adminWindow, worldId, &camera.ships, &camera);
     logDebug("Admin window initialized");
 
-    // Load environment variables
-    if (!loadEnvFile(".env")) {
-        logDebug("Warning: Failed to load .env file, falling back to environment variables");
+    // Get executable path and workspace directory
+    char exe_path[PATH_MAX];
+    char workspace_path[PATH_MAX];
+    ssize_t count = readlink("/proc/self/exe", exe_path, PATH_MAX - 1);
+    if (count != -1) {
+        exe_path[count] = '\0';  // Ensure null termination
+        char* last_slash = strrchr(exe_path, '/');
+        if (last_slash) {
+            *last_slash = '\0';  // Remove executable name
+            char* build_dir = strstr(exe_path, "/build");
+            if (build_dir) {
+                *build_dir = '\0';  // Remove /build from path
+            }
+            strncpy(workspace_path, exe_path, PATH_MAX - 1);
+            workspace_path[PATH_MAX - 1] = '\0';  // Ensure null termination
+        }
+    }
+
+    // Construct full path to .env file with bounds checking
+    char env_path[PATH_MAX];
+    size_t base_len = strlen(workspace_path);
+    if (base_len + 6 > PATH_MAX) {  // 6 = strlen("/.env") + 1
+        logDebug("ERROR: Path too long for .env file");
+        return -1;
+    }
+    memcpy(env_path, workspace_path, base_len);
+    memcpy(env_path + base_len, "/.env", 6);  // Includes null terminator
+
+    logDebug("Looking for .env at: %s", env_path);
+
+    // Load environment variables with full path
+    if (!loadEnvFile(env_path)) {
+        logDebug("Warning: Failed to load .env file at %s, falling back to environment variables", env_path);
         // Check if we're in development mode
         if (strcmp(getEnvOrDefault("ENV", "dev"), "production") == 0) {
             logDebug("ERROR: Missing .env file in production mode");
@@ -268,9 +300,10 @@ int main() {
 
     // Initialize database client with credentials
     GameServer server = {0};
-    if (!initDatabaseClient(&server.dbClient, auth_host, auth_port, server_id, server_token)) {
-        logDebug("Failed to initialize database client");
-        return -1;
+    if (!initDatabaseClient(&server.dbClient, auth_host, auth_port, 
+                           server_id, server_token, CONN_TYPE_TCP)) {
+        fprintf(stderr, "Failed to initialize database client\n");
+        return 1;
     }
     logDebug("Database client initialized with server ID: %s", server_id);
 
