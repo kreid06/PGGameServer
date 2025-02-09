@@ -18,6 +18,14 @@
 #define WS_TOKEN_PARAM "token="
 #define WS_URL_MAX_LEN 512
 
+#define WS_KEY_LENGTH 24
+#define WS_ACCEPT_LENGTH 28
+#define WS_HANDSHAKE_RESPONSE \
+    "HTTP/1.1 101 Switching Protocols\r\n" \
+    "Upgrade: websocket\r\n" \
+    "Connection: Upgrade\r\n" \
+    "Sec-WebSocket-Accept: %s\r\n\r\n"
+
 typedef struct {
     int sock;  // Changed from sock_fd to sock
     char* host;
@@ -32,6 +40,10 @@ typedef struct {
     size_t rx_len;
     time_t last_ping;
     time_t last_pong;
+    char ws_key[WS_KEY_LENGTH + 1];
+    bool handshake_complete;
+    bool initialized;     // Add initialization flag
+    bool valid;          // Add validity check
 } WebSocket;
 
 // Core WebSocket functions
@@ -57,5 +69,8 @@ bool ws_send_health_check(WebSocket* ws);  // New function to replace sendWebSoc
 // Add URL helper functions
 bool ws_parse_connect_url(const char* url, char* host, int* port, char* token);
 char* ws_build_connect_url(const char* host, int port, const char* token);
+
+// Add function declaration
+static bool complete_handshake(WebSocket* ws, const char* sec_ws_key);
 
 #endif

@@ -49,6 +49,7 @@ static bool sendAuthRequest(DatabaseClient* client);
 static bool readMultiPartMessage(DatabaseClient* client, uint8_t* buffer, size_t* total_size);
 static bool sendMessage(DatabaseClient* client, uint8_t type, const void* payload, uint32_t length);
 static bool readMessage(DatabaseClient* client, uint8_t* type, void* payload, uint32_t* length);
+static bool skipMessagePayload(int sock, size_t length);
 
 // Health check packet: [0x04][00 00 00 00]
 static uint8_t health_check_packet[] = {
@@ -346,38 +347,37 @@ bool checkDatabaseHealth(DatabaseClient* client, DatabaseHealth* health) {
 
             MessageHeader* resp_header = (MessageHeader*)buffer;
             
-            // First check for server info message
-            if (resp_header->type == MSG_SERVER_INFO) {
-                fprintf(stderr, "[DB] Reading server info message (0x04) with length %d\n", 
-                        resp_header->length);
-
-                // Read the entire server info message including payload
-                ssize_t remaining = resp_header->length;
-                ssize_t read_pos = sizeof(MessageHeader);
-
-                while (remaining > 0) {
-                    bytes = recv(client->sock, buffer + read_pos, remaining, 0);
-                    if (bytes <= 0) {
-                        fprintf(stderr, "[DB] Failed to read server info payload: %s\n", 
-                                strerror(errno));
+            switch(resp_header->type) {
+                case MSG_SERVER_INFO:
+                    fprintf(stderr, "[DB] Server info message - skipping %d bytes\n", 
+                            resp_header->length);
+                    if (!skipMessagePayload(client->sock, resp_header->length)) {
+                        fprintf(stderr, "[DB] Failed to skip server info payload\n");
                         return false;
                     }
-                    remaining -= bytes;
-                    read_pos += bytes;
-                }
-                fprintf(stderr, "[DB] Successfully read server info message\n");
-                continue;  // Move to next message
-            }
+                    fprintf(stderr, "[DB] Successfully skipped server info message\n");
+                    continue;
 
-            if (resp_header->type == MSG_HEALTH_RESPONSE) {
-                // Process health response
-                fprintf(stderr, "[DB] Got health response (0x06)\n");
-                // ... rest of health response handling ...
-                return true;
-            }
+                case MSG_HEALTH_RESPONSE:
+                    fprintf(stderr, "[DB] Got health response\n");
+                    if (parseHealthResponse(buffer + sizeof(MessageHeader), 
+                                         resp_header->length,  // Length might be 0
+                                         &client->last_health)) {
+                        *health = client->last_health;
+                        client->last_health_check = time(NULL);
+                        return true;
+                    }
+                    return false;
 
-            fprintf(stderr, "[DB] Unexpected message type 0x%02x\n", resp_header->type);
-            return false;
+                default:
+                    fprintf(stderr, "[DB] Unknown message type 0x%02x - skipping %d bytes\n",
+                            resp_header->type, resp_header->length);
+                    if (!skipMessagePayload(client->sock, resp_header->length)) {
+                        fprintf(stderr, "[DB] Failed to skip unknown message payload\n");
+                        return false;
+                    }
+                    continue;
+            }
         }
 
         fprintf(stderr, "[DB] Timed out waiting for health response\n");
@@ -455,9 +455,21 @@ bool checkDatabaseHealth(DatabaseClient* client, DatabaseHealth* health) {
 
 // Add new helper function to parse health response
 static bool parseHealthResponse(const uint8_t* buffer, size_t size, DatabaseHealth* health) {
+    // Allow empty responses for keepalive-style health checks
+    if (size == 0) {
+        // Just mark as healthy with minimal data
+        health->status = 1;
+        health->timestamp = time(NULL);
+        health->db_latency = 0;
+        health->memory_used = 0;
+        health->memory_total = 0;
+        health->uptime_ms = 0;
+        return true;
+    }
+
+    // If we have payload, it must be the full health response
     if (size != sizeof(HealthResponsePayload)) {
-        fprintf(stderr, "[DB] Invalid response size: got %zu, expected %zu\n",
-                size, sizeof(HealthResponsePayload));
+        fprintf(stderr, "[DB] Invalid health response size: got %zu\n", size);
         return false;
     }
 
@@ -489,73 +501,103 @@ bool validateHealthValues(const DatabaseHealth* health) {
     return true;
 }
 
-bool verifyUserToken(DatabaseClient* client, const char* token, TokenVerifyResult* result) {
-    if (!client->connected || !client->auth_complete) {
-        fprintf(stderr, "[DB] Cannot verify token - not connected/authenticated\n");
-        return false;
-    }
-
-    // Prepare verify token message
+// Update the sendCompleteMessage function signature to include client
+static bool sendCompleteMessage(DatabaseClient* client, uint8_t type, const void* payload, size_t payload_len) {
     MessageHeader header = {
-        .type = MSG_VERIFY_TOKEN,
-        .version = 1,
-        .sequence = client->sequence++,
-        .length = strlen(token)
+        .type = type,
+        .version = MESSAGE_VERSION,
+        .sequence = client->sequence++,  // Use client's sequence
+        .length = payload_len
     };
 
-    // Send header
-    if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
-        fprintf(stderr, "[DB] Failed to send verify token header: %s\n", strerror(errno));
+    // Allocate single buffer for complete message
+    uint8_t* packet = malloc(sizeof(header) + payload_len);
+    if (!packet) {
+        fprintf(stderr, "[DB] Failed to allocate message buffer\n");
         return false;
     }
 
-    // Send token
-    if (send(client->sock, token, header.length, MSG_NOSIGNAL) != header.length) {
-        fprintf(stderr, "[DB] Failed to send token: %s\n", strerror(errno));
-        return false;
+    // Copy header and payload into single buffer
+    memcpy(packet, &header, sizeof(header));
+    if (payload && payload_len > 0) {
+        memcpy(packet + sizeof(header), payload, payload_len);
     }
 
-    // Read response header
-    MessageHeader resp_header;
-    if (recv(client->sock, &resp_header, sizeof(resp_header), 0) != sizeof(resp_header)) {
-        fprintf(stderr, "[DB] Failed to read verify response header\n");
-        return false;
-    }
-
-    // Validate response type
-    if (resp_header.type != MSG_VERIFY_TOKEN || resp_header.version != 1) {
-        fprintf(stderr, "[DB] Invalid verify response type/version\n");
-        return false;
-    }
-
-    // Read verify result
-    uint8_t verify_success;
-    if (recv(client->sock, &verify_success, 1, 0) != 1) {
-        fprintf(stderr, "[DB] Failed to read verify result\n");
-        return false;
-    }
-
-    result->success = verify_success;
+    // Send complete message
+    bool success = (send(client->sock, packet, sizeof(header) + payload_len, MSG_NOSIGNAL) == 
+                   sizeof(header) + payload_len);
     
-    if (verify_success) {
-        // Read player ID on success
-        if (recv(client->sock, &result->data.player_id, sizeof(uint32_t), 0) != sizeof(uint32_t)) {
-            fprintf(stderr, "[DB] Failed to read player ID\n");
+    if (!success) {
+        fprintf(stderr, "[DB] Failed to send message: %s\n", strerror(errno));
+    }
+
+    free(packet);
+    return success;
+}
+
+bool verifyUserToken(DatabaseClient* client, const char* token, TokenVerifyResult* result) {
+    // First ensure we have an active connection
+    if (client->state != CONN_STATE_CONNECTED) {
+        if (!initializeHealthCheck(client)) {
+            fprintf(stderr, "[DB] Cannot verify token - failed to establish connection\n");
             return false;
         }
-        fprintf(stderr, "[DB] Token verified successfully for player %u\n", 
-                result->data.player_id);
+    }
+
+    size_t token_len = strlen(token);
+    size_t total_message_size = sizeof(MessageHeader) + token_len;
+
+    fprintf(stderr, "[DB] Preparing token verify message (total %zu bytes):\n", total_message_size);
+    fprintf(stderr, "[DB] - Header: %zu bytes\n", sizeof(MessageHeader));
+    fprintf(stderr, "[DB] - Token payload: %zu bytes\n", token_len);
+
+    // Send verify token message as single packet
+    if (!sendCompleteMessage(client, MSG_VERIFY_TOKEN, token, token_len)) {
+        fprintf(stderr, "[DB] Failed to send verify token message (%zu bytes)\n", total_message_size);
+        return false;
+    }
+
+    fprintf(stderr, "[DB] Sent token verification request - %zu bytes sent\n", total_message_size);
+
+    // Read response with timeout
+    uint8_t buffer[1024];
+    ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), 0);
+    if (bytes < sizeof(MessageHeader)) {
+        fprintf(stderr, "[DB] Invalid verify response\n"); 
+        return false;
+    }
+
+    MessageHeader* resp = (MessageHeader*)buffer;
+    if (resp->type != MSG_VERIFY_TOKEN) {
+        fprintf(stderr, "[DB] Unexpected response type 0x%02x\n", resp->type);
+        return false;
+    }
+
+    // Parse verification response:
+    // [Header][success byte][player_id or error message]
+    if (resp->length < 1) {
+        fprintf(stderr, "[DB] Invalid verify response length\n");
+        return false;
+    }
+
+    uint8_t success = buffer[sizeof(MessageHeader)];
+    result->success = success;
+
+    if (success) {
+        // Copy player ID from response
+        if (resp->length != 5) {  // 1 byte success + 4 bytes player_id
+            fprintf(stderr, "[DB] Invalid success response length: %d\n", resp->length);
+            return false;
+        }
+        memcpy(&result->data.player_id, buffer + sizeof(MessageHeader) + 1, sizeof(uint32_t));
+        fprintf(stderr, "[DB] Token verified for player %u\n", result->data.player_id);
     } else {
-        // Read error message on failure
-        size_t error_len = resp_header.length - 1; // -1 for verify_success byte
+        // Copy error message
+        size_t error_len = resp->length - 1;  // -1 for success byte
         if (error_len >= sizeof(result->data.error)) {
-            fprintf(stderr, "[DB] Error message too long\n");
-            return false;
+            error_len = sizeof(result->data.error) - 1;
         }
-        if (recv(client->sock, result->data.error, error_len, 0) != error_len) {
-            fprintf(stderr, "[DB] Failed to read error message\n");
-            return false;
-        }
+        memcpy(result->data.error, buffer + sizeof(MessageHeader) + 1, error_len);
         result->data.error[error_len] = '\0';
         fprintf(stderr, "[DB] Token verification failed: %s\n", result->data.error);
     }
@@ -744,5 +786,21 @@ static bool sendMessage(DatabaseClient* client, uint8_t type, const void* payloa
         }
     }
 
+    return true;
+}
+
+static bool skipMessagePayload(int sock, size_t length) {
+    uint8_t skip_buffer[1024];
+    size_t remaining = length;
+    
+    while (remaining > 0) {
+        size_t to_read = remaining > sizeof(skip_buffer) ? sizeof(skip_buffer) : remaining;
+        ssize_t bytes = recv(sock, skip_buffer, to_read, 0);
+        if (bytes <= 0) {
+            fprintf(stderr, "[DB] Failed to skip payload: %s\n", strerror(errno));
+            return false;
+        }
+        remaining -= bytes;
+    }
     return true;
 }

@@ -79,8 +79,32 @@ bool ws_has_pending_connections(void) {
 }
 
 const char* ws_get_connect_token(void) {
-    // Should be called after verifying headers in actual implementation
+    if (ws_server.current_token[0] == '\0') {
+        fprintf(stderr, "[WS] Warning: No token found in current connection\n");
+        return NULL;
+    }
     return ws_server.current_token;
+}
+
+static bool complete_handshake(WebSocket* ws, const char* sec_ws_key) {
+    char accept_key[WS_ACCEPT_LENGTH];
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    char concat_buf[WS_KEY_LENGTH + sizeof(WS_GUID)];
+    
+    // Concatenate key with GUID
+    snprintf(concat_buf, sizeof(concat_buf), "%s%s", sec_ws_key, WS_GUID);
+    
+    // Generate SHA1
+    SHA1((unsigned char*)concat_buf, strlen(concat_buf), hash);
+    
+    // Base64 encode
+    EVP_EncodeBlock((unsigned char*)accept_key, hash, SHA_DIGEST_LENGTH);
+    
+    // Send handshake response
+    char response[1024];
+    snprintf(response, sizeof(response), WS_HANDSHAKE_RESPONSE, accept_key);
+    
+    return send(ws->sock, response, strlen(response), 0) > 0;
 }
 
 WebSocket* ws_accept_connection(void) {
@@ -99,17 +123,96 @@ WebSocket* ws_accept_connection(void) {
     fprintf(stderr, "[WS] New client connection from %s:%d\n", 
             client_ip, ntohs(client_addr.sin_port));
 
-    WebSocket* ws = malloc(sizeof(WebSocket));
+    // Initialize WebSocket structure with calloc
+    WebSocket* ws = calloc(1, sizeof(WebSocket));
     if (!ws) {
-        fprintf(stderr, "[WS] Failed to allocate memory for new connection from %s\n", client_ip);
+        fprintf(stderr, "[WS] Failed to allocate memory for WebSocket\n");
         close(client_fd);
         return NULL;
     }
 
+    // Mark as initialized and valid
+    ws->initialized = true;
+    ws->valid = true;
     ws->sock = client_fd;
+    ws->connected = false;  // Not connected until handshake complete
+    ws->handshake_complete = false;
+
+    // Read HTTP request headers
+    char request_buffer[4096] = {0};
+    size_t total_read = 0;
+    
+    while (total_read < sizeof(request_buffer) - 1) {
+        ssize_t bytes = recv(client_fd, request_buffer + total_read, 
+                           sizeof(request_buffer) - total_read - 1, 0);
+        if (bytes <= 0) {
+            fprintf(stderr, "[WS] Failed to read request headers\n");
+            free(ws);
+            close(client_fd);
+            return NULL;
+        }
+        total_read += bytes;
+        
+        if (strstr(request_buffer, "\r\n\r\n")) break;
+    }
+    request_buffer[total_read] = '\0';
+
+    fprintf(stderr, "[WS] Received request headers:\n%s\n", request_buffer);
+
+    // First extract token before handshake
+    char* token_start = strstr(request_buffer, "token=");
+    if (token_start) {
+        token_start += 6;
+        char* token_end = strpbrk(token_start, " \r\n&");
+        if (token_end) {
+            size_t token_len = token_end - token_start;
+            if (token_len < sizeof(ws_server.current_token)) {
+                memcpy(ws_server.current_token, token_start, token_len);
+                ws_server.current_token[token_len] = '\0';
+                fprintf(stderr, "[WS] Extracted token length: %zu\n", token_len);
+            }
+        }
+    } else {
+        fprintf(stderr, "[WS] No token found in request\n");
+        // Still continue with handshake
+    }
+
+    // Now handle WebSocket handshake
+    char* key_start = strstr(request_buffer, "Sec-WebSocket-Key: ");
+    if (!key_start) {
+        fprintf(stderr, "[WS] No WebSocket key found\n");
+        free(ws);
+        close(client_fd);
+        return NULL;
+    }
+
+    key_start += 19;
+    char* key_end = strstr(key_start, "\r\n");
+    if (!key_end || (key_end - key_start) > WS_KEY_LENGTH) {
+        fprintf(stderr, "[WS] Invalid WebSocket key length\n");
+        free(ws);
+        close(client_fd);
+        return NULL;
+    }
+
+    // Store key temporarily
+    size_t key_len = key_end - key_start;
+    char sec_ws_key[WS_KEY_LENGTH + 1] = {0};
+    memcpy(sec_ws_key, key_start, key_len);
+
+    // Complete handshake
+    if (!complete_handshake(ws, sec_ws_key)) {
+        fprintf(stderr, "[WS] Failed to complete WebSocket handshake\n");
+        ws->valid = false;
+        free(ws);
+        close(client_fd);
+        return NULL;
+    }
+
+    // Only now mark as connected and ready
+    ws->handshake_complete = true;
     ws->connected = true;
-    fprintf(stderr, "[WS] Client connection established from %s\n", client_ip);
-    // ... initialize other WebSocket fields ...
+    fprintf(stderr, "[WS] WebSocket handshake complete, connection ready\n");
 
     return ws;
 }
