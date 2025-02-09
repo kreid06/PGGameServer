@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include "player_connection.h"
 
 // Unified timing constants
 #define PHYSICS_UPDATE_HZ 60        // Physics runs at 60Hz
@@ -290,7 +291,10 @@ int main() {
     const char* server_token = getEnvOrDefault("GAME_SERVER_TOKEN", NULL);
     const char* auth_host = getEnvOrDefault("AUTH_SERVER_HOST", "localhost");
     const char* auth_port_str = getEnvOrDefault("AUTH_SERVER_PORT", "3000");
+    const char* game_port_str = getEnvOrDefault("GAME_SERVER_PORT", "8080");
+    
     int auth_port = atoi(auth_port_str);
+    int game_port = atoi(game_port_str);
 
     if (!server_id || !server_token) {
         logDebug("ERROR: Required environment variables GAME_SERVER_ID and GAME_SERVER_TOKEN must be set");
@@ -298,14 +302,50 @@ int main() {
         return -1;
     }
 
-    // Initialize database client with credentials
+    // Initialize database client and ensure it's connected before accepting players
     GameServer server = {0};
     if (!initDatabaseClient(&server.dbClient, auth_host, auth_port, 
                            server_id, server_token, CONN_TYPE_TCP)) {
         fprintf(stderr, "Failed to initialize database client\n");
         return 1;
     }
-    logDebug("Database client initialized with server ID: %s", server_id);
+
+    // Wait for initial database connection and authentication
+    DatabaseHealth health;
+    int retry_count = 0;
+    bool db_ready = false;
+
+    while (!db_ready && retry_count < 5) {
+        if (checkDatabaseHealth(&server.dbClient, &health)) {
+            // Connection is good and we got a valid health response
+            db_ready = true;
+            logDebug("Database connection established and healthy");
+            break;
+        }
+        logDebug("Waiting for database connection... attempt %d", retry_count + 1);
+        sleep(1);
+        retry_count++;
+    }
+
+    if (!db_ready) {
+        logDebug("Failed to establish database connection after %d attempts", retry_count);
+        return 1;
+    }
+
+    // Now we can proceed with game server initialization
+    // Now initialize player manager with authenticated db client
+    PlayerConnectionManager playerManager;
+    if (!initPlayerConnectionManager(&playerManager, &server.dbClient)) {
+        fprintf(stderr, "Failed to initialize player connection manager\n");
+        return 1;
+    }
+
+    // Start WebSocket server with configured port
+    if (!ws_start_server(NULL, game_port)) {  // Listen on all interfaces, port 8080
+        logDebug("Failed to start WebSocket server on port %d", game_port);
+        return 1;
+    }
+    logDebug("WebSocket server started on port %d", game_port);
 
     double lastPhysicsUpdate = GetTime();
     double lastVisualUpdate = GetTime();
@@ -360,6 +400,17 @@ int main() {
             server.lastHealthCheck = currentTime;
         }
 
+        // Handle any new player connections
+        if (ws_has_pending_connections()) {
+            const char* token = ws_get_connect_token();
+            WebSocket* ws = ws_accept_connection();
+            
+            if (!handleNewPlayerConnection(&playerManager, token, ws)) {
+                ws_disconnect(ws);
+                free(ws);
+            }
+        }
+
         BeginDrawing();
         ClearBackground(RAYWHITE);
         
@@ -410,10 +461,12 @@ int main() {
     }
 
     logDebug("Cleaning up...");
+    cleanupPlayerConnectionManager(&playerManager);
     closeAdminWindow(&adminWindow);
     stopAdminConsole(&adminConsole);
     cleanupDatabaseClient(&server.dbClient);
     b2DestroyWorld(worldId);
+    ws_stop_server();
     CloseWindow();
     logDebug("Shutdown complete");
     

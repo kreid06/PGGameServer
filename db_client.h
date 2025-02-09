@@ -25,7 +25,7 @@
 #define PKT_TYPE_HEALTH_CHECK  0x04
 #define PKT_TYPE_HEALTH_RESP   0x05
 #define PKT_TYPE_AUTH_ACK      0x03
-#define PKT_TYPE_SERVER_INFO   0x04
+#define PKT_TYPE_SERVER_INFO   0x06
 
 // Add server info structure
 typedef struct {

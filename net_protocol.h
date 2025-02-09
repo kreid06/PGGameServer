@@ -10,13 +10,14 @@
 
 // Protocol message types - Unified definitions
 // Core protocol messages (0x01-0x0F)
-#define MSG_AUTH_REQUEST        0x01  // Auth can be multi-part
-#define MSG_AUTH_RESPONSE       0x02  
-#define MSG_VERIFY_TOKEN        0x03
-#define MSG_SERVER_INFO         0x04
-#define MSG_HEALTH_CHECK        0x05  // Single part message
-#define MSG_HEALTH_RESPONSE     0x06
+#define MSG_AUTH_REQUEST     0x01  // Auth request
+#define MSG_AUTH_RESPONSE    0x02  // Auth response
+#define MSG_VERIFY_TOKEN     0x03  // Token verification
+#define MSG_SERVER_INFO      0x04  // Server info
+#define MSG_HEALTH_CHECK     0x05  // Health check (our new type)
+#define MSG_HEALTH_RESPONSE  0x06  // Health response (our new type)
 #define MSG_VERIFY_SESSION      0x07
+// No message type 0x15 should be used here
 
 // Player auth messages
 #define MSG_LOGIN              0x11
@@ -26,13 +27,12 @@
 #define MSG_ERROR             0xFF
 
 // Connection & Authentication (0x10-0x1F) 
-#define MSG_CONNECT_REQUEST     0x10
-#define MSG_CONNECT_SUCCESS     0x11
-#define MSG_TOKEN_VERIFY        0x12
-#define MSG_AUTH_FAILURE        0x13
-#define MSG_KEEP_ALIVE          0x14   // Client -> Server keepalive 
-#define MSG_KEEP_ALIVE_RESP     0x15   // Server -> Client keepalive response
-#define MSG_SERVER_ERROR       0x15
+#define MSG_CONNECT_REQUEST   0x10
+#define MSG_CONNECT_SUCCESS   0x11
+#define MSG_TOKEN_VERIFY      0x12 
+#define MSG_AUTH_FAILURE      0x13
+// Remove all keepalive related codes since we use health check
+#define MSG_SERVER_ERROR      0x1F   // Move to 0x1F to avoid conflicts
 
 // Player Actions (0x20-0x2F)
 #define MSG_PLAYER_MOVEMENT    0x20
@@ -71,6 +71,10 @@
 // Protocol constants
 #define MAX_TOKEN_LENGTH 1024
 #define HEADER_SIZE 5  // 1 byte type + 4 bytes length
+
+// Add standardized message format constants
+#define MESSAGE_HEADER_SIZE 8   // 1 type + 1 version + 2 sequence + 4 length
+#define MESSAGE_VERSION    1    // Current protocol version
 
 // Health check response structure
 typedef struct {
@@ -149,6 +153,37 @@ typedef struct {
     MessageHeader header;  // type=MSG_KEEP_ALIVE_RESP, length=1
     uint8_t status;       // 1=OK, 0=Error
 } __attribute__((packed)) KeepaliveResponse;
+
+// Health check protocol messages
+typedef struct {
+    uint32_t server_id_hash;  // Server ID hash for identification
+} __attribute__((packed)) HealthCheckPayload;  // 4 bytes
+
+typedef struct {
+    uint8_t status;           // 0 = unhealthy, 1 = healthy
+    uint64_t timestamp;       // Server time in Unix timestamp
+    uint32_t db_latency;      // Database latency in milliseconds
+    uint64_t memory_used;     // Current memory usage in bytes
+    uint64_t memory_total;    // Total available memory in bytes
+    uint64_t uptime;         // Server uptime in milliseconds
+} __attribute__((packed)) HealthResponsePayload;  // 37 bytes total
+
+// Message exchange pattern:
+// Client -> Server:
+// [Header 8 bytes][HealthCheckPayload 4 bytes]
+// - type = MSG_HEALTH_CHECK (0x05)
+// - version = 1
+// - sequence = uint16
+// - length = 4
+// - payload = server_id_hash
+
+// Server -> Client:
+// [Header 8 bytes][HealthResponsePayload 37 bytes]
+// - type = MSG_HEALTH_RESPONSE (0x06)
+// - version = 1
+// - sequence = matches request
+// - length = 37
+// - payload = health data structure
 
 // Message building helper
 typedef struct {

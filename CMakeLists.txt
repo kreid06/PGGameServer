@@ -63,6 +63,9 @@ target_link_libraries(game_dashboard PRIVATE
     ${OPENSSL_CRYPTO_LIBRARIES}
 )
 target_compile_options(game_dashboard PRIVATE -O3 -march=native -flto)
+target_sources(game_dashboard PRIVATE
+    player_connection.c
+)
 
 # Debug build
 add_executable(game_dashboard_debug ${COMMON_SOURCES})
@@ -77,3 +80,6 @@ target_link_libraries(game_dashboard_debug PRIVATE
     ${OPENSSL_CRYPTO_LIBRARIES}
 )
 target_compile_options(game_dashboard_debug PRIVATE -g -O0)
+target_sources(game_dashboard_debug PRIVATE
+    player_connection.c
+)

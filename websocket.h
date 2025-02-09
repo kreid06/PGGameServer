@@ -13,6 +13,11 @@
 #define WS_FRAME_PING  0x9
 #define WS_FRAME_PONG  0xA
 
+// Add URL constants
+#define WS_CONNECT_PATH "/game/connect"
+#define WS_TOKEN_PARAM "token="
+#define WS_URL_MAX_LEN 512
+
 typedef struct {
     int sock;  // Changed from sock_fd to sock
     char* host;
@@ -38,8 +43,19 @@ bool ws_send_pong(WebSocket* ws);
 void ws_handle_ping(WebSocket* ws);
 void ws_service(WebSocket* ws);  // Call this regularly to handle incoming data
 
+// Add WebSocket server functions
+bool ws_start_server(const char* host, int port);
+bool ws_has_pending_connections(void);
+const char* ws_get_connect_token(void);
+WebSocket* ws_accept_connection(void);
+void ws_stop_server(void);
+
 // Add missing declarations
 void ws_set_message_handler(WebSocket* ws, void (*handler)(void*, const uint8_t*, size_t));
 bool ws_send_health_check(WebSocket* ws);  // New function to replace sendWebSocketHealthCheck
+
+// Add URL helper functions
+bool ws_parse_connect_url(const char* url, char* host, int* port, char* token);
+char* ws_build_connect_url(const char* host, int port, const char* token);
 
 #endif

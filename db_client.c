@@ -52,7 +52,8 @@ static bool readMessage(DatabaseClient* client, uint8_t* type, void* payload, ui
 
 // Health check packet: [0x04][00 00 00 00]
 static uint8_t health_check_packet[] = {
-    MSG_HEALTH_CHECK, 0x00, 0x00, 0x00, 0x00
+    MSG_HEALTH_CHECK,  // Now using 0x05
+    0x00, 0x00, 0x00, 0x00
 };
 
 // Curl callback function
@@ -167,8 +168,9 @@ static bool readAuthResponse(DatabaseClient* client) {
     client->auth_complete = (success != 0);
     client->auth_success = (success != 0);
 
+    // Ensure we properly set all state flags on success
     if (client->auth_success) {
-        // Set socket back to non-blocking for normal operation
+        // Set socket back to non-blocking
         int flags = fcntl(client->sock, F_GETFL, 0);
         if (flags != -1) {
             fcntl(client->sock, F_SETFL, flags | O_NONBLOCK);
@@ -177,7 +179,9 @@ static bool readAuthResponse(DatabaseClient* client) {
         client->state = CONN_STATE_CONNECTED;
         client->connected = true;
         client->last_keepalive = time(NULL);
-        fprintf(stderr, "[DB] Connection authenticated successfully\n");
+        client->last_ping = 0;  // Reset ping/pong tracking
+        client->last_pong = time(NULL);
+        fprintf(stderr, "[DB] Connection authenticated and ready\n");
     }
 
     return client->auth_success;
@@ -304,174 +308,168 @@ static bool initializeHealthCheck(DatabaseClient* client) {
 bool checkDatabaseHealth(DatabaseClient* client, DatabaseHealth* health) {
     time_t now = time(NULL);
 
-    // Only initialize if BOTH disconnected AND not authenticated
-    if (client->state == CONN_STATE_DISCONNECTED && !client->auth_complete) {
+    // Only initialize if disconnected
+    if (client->state == CONN_STATE_DISCONNECTED) {
         if (!initializeHealthCheck(client)) {
             return false;
         }
-        client->state = CONN_STATE_CONNECTING;
-        client->last_keepalive = now;
-        return false; // First call just establishes connection
     }
 
-    // Handle connection states
-    switch (client->state) {
-        case CONN_STATE_CONNECTING:
-        case CONN_STATE_AUTHENTICATING:
-            // Still in connection process
+    // After authentication, send initial health check
+    if (client->state == CONN_STATE_CONNECTED && !client->last_health_check) {
+        MessageHeader header = {
+            .type = MSG_HEALTH_CHECK,     // Now using 0x05
+            .version = MESSAGE_VERSION,
+            .sequence = client->sequence++,
+            .length = 0  // No payload needed, connection already authenticated
+        };
+
+        fprintf(stderr, "[DB] Sending initial health check - type=0x%02x ver=%d seq=%d\n",
+                header.type, header.version, header.sequence);
+
+        if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
+            fprintf(stderr, "[DB] Failed to send health check message\n");
             return false;
+        }
 
-        case CONN_STATE_CONNECTED:
-            if (!client->connected) {
-                client->state = CONN_STATE_DISCONNECTED;
+        // Handle multiple possible responses
+        uint8_t buffer[1024];
+        time_t start_time = time(NULL);
+        const int MAX_WAIT_SECS = 5;  // Maximum wait time
+        
+        while (time(NULL) - start_time < MAX_WAIT_SECS) {
+            ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), 0);
+            if (bytes < sizeof(MessageHeader)) {
+                fprintf(stderr, "[DB] Invalid message - too short (%zd bytes)\n", bytes);
                 return false;
             }
 
-            // Initial keepalive case - wait 10s after connecting
-            if (client->last_ping == 0 && now - client->last_pong >= 10) {
-                fprintf(stderr, "[DB] Sending initial keepalive (after 10s)\n");
-                MessageHeader header = {
-                    .type = MSG_KEEP_ALIVE,
-                    .version = 1,
-                    .sequence = client->sequence++,
-                    .length = 0
-                };
-                
-                if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
-                    fprintf(stderr, "[DB] Failed to send initial keepalive: %s\n", strerror(errno));
-                    close(client->sock);
-                    client->state = CONN_STATE_DISCONNECTED;
-                    client->connected = false;
-                    return false;
+            MessageHeader* resp_header = (MessageHeader*)buffer;
+            
+            // First check for server info message
+            if (resp_header->type == MSG_SERVER_INFO) {
+                fprintf(stderr, "[DB] Reading server info message (0x04) with length %d\n", 
+                        resp_header->length);
+
+                // Read the entire server info message including payload
+                ssize_t remaining = resp_header->length;
+                ssize_t read_pos = sizeof(MessageHeader);
+
+                while (remaining > 0) {
+                    bytes = recv(client->sock, buffer + read_pos, remaining, 0);
+                    if (bytes <= 0) {
+                        fprintf(stderr, "[DB] Failed to read server info payload: %s\n", 
+                                strerror(errno));
+                        return false;
+                    }
+                    remaining -= bytes;
+                    read_pos += bytes;
                 }
-                client->last_ping = now;
-            }
-            // Send next keepalive 4s after receiving response
-            else if (client->last_pong > client->last_ping && // Only if we got a response
-                     now - client->last_pong >= 4) {          // Wait 4s after response
-                fprintf(stderr, "[DB] Sending periodic keepalive\n");
-                MessageHeader header = {
-                    .type = MSG_KEEP_ALIVE,
-                    .version = 1,
-                    .sequence = client->sequence++,
-                    .length = 0
-                };
-                
-                if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
-                    fprintf(stderr, "[DB] Failed to send keepalive: %s\n", strerror(errno));
-                    close(client->sock);
-                    client->state = CONN_STATE_DISCONNECTED;
-                    client->connected = false;
-                    return false;
-                }
-                client->last_ping = now;
-            }
-            // Connection timeout after 20s of no response (changed from 10s)
-            else if (client->last_ping > 0 &&                // If we sent a ping
-                     client->last_ping > client->last_pong && // No response received
-                     now - client->last_ping >= 20) {        // 20s timeout
-                fprintf(stderr, "[DB] No keepalive response for 20s, closing connection\n");
-                close(client->sock);
-                client->state = CONN_STATE_DISCONNECTED;
-                client->connected = false;
-                return false;
+                fprintf(stderr, "[DB] Successfully read server info message\n");
+                continue;  // Move to next message
             }
 
-            // ... rest of existing health check code ...
-            break;
+            if (resp_header->type == MSG_HEALTH_RESPONSE) {
+                // Process health response
+                fprintf(stderr, "[DB] Got health response (0x06)\n");
+                // ... rest of health response handling ...
+                return true;
+            }
 
-        default:
+            fprintf(stderr, "[DB] Unexpected message type 0x%02x\n", resp_header->type);
+            return false;
+        }
+
+        fprintf(stderr, "[DB] Timed out waiting for health response\n");
+        return false;
+    }
+
+    // Handle periodic health checks
+    if (client->state == CONN_STATE_CONNECTED) {
+        if (!client->connected) {
             client->state = CONN_STATE_DISCONNECTED;
             return false;
+        }
+
+        // Send health check every 5 seconds
+        if (now - client->last_health_check >= 5) {
+            MessageHeader header = {
+                .type = MSG_HEALTH_CHECK,
+                .version = MESSAGE_VERSION,
+                .sequence = client->sequence++,
+                .length = 0  // No payload needed for regular checks
+            };
+            
+            if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
+                fprintf(stderr, "[DB] Failed to send health check: %s\n", strerror(errno));
+                return false;
+            }
+            
+            fprintf(stderr, "[DB] Sent health check type=0x%02x seq=%d\n", 
+                    header.type, header.sequence);
+        }
+
+        // Handle response
+        uint8_t buffer[1024];
+        ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), MSG_DONTWAIT);
+        
+        if (bytes >= sizeof(MessageHeader)) {
+            MessageHeader* header = (MessageHeader*)buffer;
+            if (header->type == MSG_HEALTH_RESPONSE) {
+                client->last_health_check = now;  // Always update timestamp
+                
+                if (header->length > 0) {
+                    // Parse full health data if provided
+                    if (parseHealthResponse(buffer + sizeof(MessageHeader),
+                                         header->length,
+                                         &client->last_health)) {
+                        *health = client->last_health;
+                    }
+                }
+                return true;  // Connection is alive
+            }
+        }
     }
 
-    // Check for response with non-blocking recv
+    // Handle responses
     uint8_t buffer[1024];
     ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), MSG_DONTWAIT);
     
     if (bytes > 0) {
-        client->last_pong = now;
-        
-        // Check if we have at least a full header
         if (bytes >= sizeof(MessageHeader)) {
             MessageHeader* header = (MessageHeader*)buffer;
-            
-            // Log and handle keepalive response
-            if (header->type == MSG_KEEP_ALIVE_RESP) {
-                fprintf(stderr, "[DB] Received keepalive response: ver=%d, seq=%d, len=%d\n",
-                        header->version, header->sequence, header->length);
-                client->last_pong = now;  // Update last pong time
-            }
-            else if (bytes >= 42 && buffer[0] == MSG_HEALTH_CHECK) {
-                parseHealthResponse(buffer, bytes, &client->last_health);
+            if (header->type == MSG_HEALTH_RESPONSE) {
+                if (parseHealthResponse(buffer + sizeof(MessageHeader), 
+                                     bytes - sizeof(MessageHeader), 
+                                     &client->last_health)) {
+                    client->last_health_check = now;
+                    *health = client->last_health;
+                    return true;
+                }
             }
         }
-    } else if (bytes == 0 || (bytes < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
-        close(client->sock);
-        client->connected = false;
-        return false;
     }
 
-    *health = client->last_health;
-    return client->connected;
+    // ... rest of existing error handling ...
 }
 
 // Add new helper function to parse health response
 static bool parseHealthResponse(const uint8_t* buffer, size_t size, DatabaseHealth* health) {
-    // Protocol:
-    // [0x05]             1 byte  - Type = HEALTH_RESPONSE
-    // [25 00 00 00]      4 bytes - Length = 37 bytes
-    // [01]               1 byte  - Status
-    // [timestamp]        8 bytes - Current time
-    // [dbLatency]        4 bytes - Database latency
-    // [memUsed]          8 bytes - Memory used
-    // [memTotal]         8 bytes - Total memory
-    // [uptime]           8 bytes - Server uptime
+    if (size != sizeof(HealthResponsePayload)) {
+        fprintf(stderr, "[DB] Invalid response size: got %zu, expected %zu\n",
+                size, sizeof(HealthResponsePayload));
+        return false;
+    }
+
+    const HealthResponsePayload* resp = (const HealthResponsePayload*)buffer;
     
-    const size_t EXPECTED_SIZE = 42;  // 1 + 4 + 37 bytes total
-    if (size < EXPECTED_SIZE) {
-        fprintf(stderr, "Response too small: got %zu bytes, expected %zu\n",
-                size, EXPECTED_SIZE);
-        return false;
-    }
-
-    // Debug print raw bytes
-    fprintf(stderr, "Raw health response (%zu bytes):\n", size);
-    for (size_t i = 0; i < size; i++) {
-        fprintf(stderr, "%02x ", buffer[i]);
-        if ((i + 1) % 8 == 0) fprintf(stderr, "\n");
-    }
-    fprintf(stderr, "\n");
-
-    // Verify message type
-    if (buffer[0] != MSG_HEALTH_CHECK) {
-        fprintf(stderr, "Invalid response type: 0x%02x\n", buffer[0]);
-        return false;
-    }
-
-    // Verify message length (should be 37)
-    uint32_t length = readUint32(buffer + 1);
-    if (length != 37) {
-        fprintf(stderr, "Invalid length: got %u, expected 37\n", length);
-        return false;
-    }
-
-    // Parse fields at correct offsets
-    health->status = buffer[5];  // 1 byte at offset 5
-    health->timestamp = readUint64(buffer + 6);  // 8 bytes at offset 6
-    health->db_latency = readUint32(buffer + 14);  // 4 bytes at offset 14
-    health->memory_used = readUint64(buffer + 18);  // 8 bytes at offset 18
-    health->memory_total = readUint64(buffer + 26);  // 8 bytes at offset 26
-    health->uptime_ms = readUint64(buffer + 34);  // 8 bytes at offset 34
-
-    // Debug print parsed values
-    fprintf(stderr, "Parsed health check response:\n");
-    fprintf(stderr, "Status: %u\n", health->status);
-    fprintf(stderr, "Timestamp: %" PRIu64 "\n", health->timestamp);
-    fprintf(stderr, "DB Latency: %u ms\n", health->db_latency);
-    fprintf(stderr, "Memory Used: %" PRIu64 " bytes\n", health->memory_used);
-    fprintf(stderr, "Memory Total: %" PRIu64 " bytes\n", health->memory_total);
-    fprintf(stderr, "Uptime: %" PRIu64 " ms\n", health->uptime_ms);
+    // Copy values directly from response structure
+    health->status = resp->status;
+    health->timestamp = resp->timestamp;
+    health->db_latency = resp->db_latency;
+    health->memory_used = resp->memory_used;
+    health->memory_total = resp->memory_total;
+    health->uptime_ms = resp->uptime;
 
     return validateHealthValues(health);
 }
@@ -492,23 +490,77 @@ bool validateHealthValues(const DatabaseHealth* health) {
 }
 
 bool verifyUserToken(DatabaseClient* client, const char* token, TokenVerifyResult* result) {
-    // Same header setup as above for consistency
-    struct curl_slist* headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/octet-stream");
-    headers = curl_slist_append(headers, "Accept: application/octet-stream");
+    if (!client->connected || !client->auth_complete) {
+        fprintf(stderr, "[DB] Cannot verify token - not connected/authenticated\n");
+        return false;
+    }
+
+    // Prepare verify token message
+    MessageHeader header = {
+        .type = MSG_VERIFY_TOKEN,
+        .version = 1,
+        .sequence = client->sequence++,
+        .length = strlen(token)
+    };
+
+    // Send header
+    if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
+        fprintf(stderr, "[DB] Failed to send verify token header: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Send token
+    if (send(client->sock, token, header.length, MSG_NOSIGNAL) != header.length) {
+        fprintf(stderr, "[DB] Failed to send token: %s\n", strerror(errno));
+        return false;
+    }
+
+    // Read response header
+    MessageHeader resp_header;
+    if (recv(client->sock, &resp_header, sizeof(resp_header), 0) != sizeof(resp_header)) {
+        fprintf(stderr, "[DB] Failed to read verify response header\n");
+        return false;
+    }
+
+    // Validate response type
+    if (resp_header.type != MSG_VERIFY_TOKEN || resp_header.version != 1) {
+        fprintf(stderr, "[DB] Invalid verify response type/version\n");
+        return false;
+    }
+
+    // Read verify result
+    uint8_t verify_success;
+    if (recv(client->sock, &verify_success, 1, 0) != 1) {
+        fprintf(stderr, "[DB] Failed to read verify result\n");
+        return false;
+    }
+
+    result->success = verify_success;
     
-    char auth_header1[512], auth_header2[512];
-    snprintf(auth_header1, sizeof(auth_header1), "X-Game-Server-ID: %s", client->server_id);
-    snprintf(auth_header2, sizeof(auth_header2), "X-Game-Server-Token: %s", client->server_token);
-    headers = curl_slist_append(headers, auth_header1);
-    headers = curl_slist_append(headers, auth_header2);
-    
-    // Remove hardcoded localhost
-    char host_header[256];
-    snprintf(host_header, sizeof(host_header), "Host: %s:%d", client->host, client->port);
-    headers = curl_slist_append(headers, host_header);
-    
-    // ...rest of verification code...
+    if (verify_success) {
+        // Read player ID on success
+        if (recv(client->sock, &result->data.player_id, sizeof(uint32_t), 0) != sizeof(uint32_t)) {
+            fprintf(stderr, "[DB] Failed to read player ID\n");
+            return false;
+        }
+        fprintf(stderr, "[DB] Token verified successfully for player %u\n", 
+                result->data.player_id);
+    } else {
+        // Read error message on failure
+        size_t error_len = resp_header.length - 1; // -1 for verify_success byte
+        if (error_len >= sizeof(result->data.error)) {
+            fprintf(stderr, "[DB] Error message too long\n");
+            return false;
+        }
+        if (recv(client->sock, result->data.error, error_len, 0) != error_len) {
+            fprintf(stderr, "[DB] Failed to read error message\n");
+            return false;
+        }
+        result->data.error[error_len] = '\0';
+        fprintf(stderr, "[DB] Token verification failed: %s\n", result->data.error);
+    }
+
+    return true;
 }
 
 void cleanupDatabaseClient(DatabaseClient* client) {
@@ -557,19 +609,19 @@ bool initDatabaseClient(DatabaseClient* client, const char* host, int port,
     
     client->sequence = 0;  // Initialize sequence number
     client->connected = false;
-    client->last_ping = 0;
-    client->last_pong = 0;
     
     client->state = CONN_STATE_DISCONNECTED;
     client->auth_complete = false;
-    client->last_keepalive = 0;
-    
+    client->auth_success = false;  // Add this explicit init
+
     return true;
 }
 
 static void sendWebSocketHealthCheck(DatabaseClient* client) {
     if (client->ws.connected) {
-        ws_send_health_check(&client->ws);
+        if (!ws_send_health_check(&client->ws)) {
+            fprintf(stderr, "[DB] Failed to send WebSocket health check\n");
+        }
     }
 }
 
@@ -587,7 +639,7 @@ static bool sendAuthRequest(DatabaseClient* client) {
         return false;
     }
     
-    // Copy and null-pad the fields
+    // Copy raw server_id and token - NOT hashed
     memcpy(payload.server_id, client->server_id, id_len);
     memcpy(payload.token, client->server_token, token_len);
     
