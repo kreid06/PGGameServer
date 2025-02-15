@@ -52,7 +52,6 @@ set(COMMON_SOURCES
     UI/admin_window.c
     world/coord_utils.c
     database/db_client.c
-    database/network/db_protocol.c
     network/websockets/websocket.c
     network/player_connection.c
     physics/player/player_physics.c

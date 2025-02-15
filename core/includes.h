@@ -16,7 +16,7 @@
 
 // Database includes
 #include "../database/db_client.h"
-#include "../database/network/db_protocol.h"
+#include "../database/protocol/db_protocol.h"
 
 // Physics includes
 #include "../physics/player/player_physics.h"

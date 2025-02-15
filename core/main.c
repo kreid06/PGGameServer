@@ -10,6 +10,7 @@
 #include <limits.h>
 
 #include "includes.h"
+#include "../database/db_client.h"  // Add database client header
 
 // Unified timing constants
 #define PHYSICS_UPDATE_HZ 60        // Physics runs at 60Hz
@@ -202,6 +203,15 @@ void logDebug(const char* format, ...) {
     va_end(args);
 }
 
+// Rename from GameServer to DatabaseState to avoid conflict
+typedef struct {
+    DatabaseClient dbClient;
+    time_t lastHealthCheck;
+    bool isDbHealthy;
+    bool reconnecting;
+    DatabaseHealth dbHealth;
+} DatabaseState;
+
 int main() {
     logDebug("Starting Game Dashboard initialization...");
     
@@ -283,10 +293,8 @@ int main() {
     const char* server_id = getEnvOrDefault("GAME_SERVER_ID", NULL);
     const char* server_token = getEnvOrDefault("GAME_SERVER_TOKEN", NULL);
     const char* auth_host = getEnvOrDefault("AUTH_SERVER_HOST", "localhost");
-    const char* auth_port_str = getEnvOrDefault("AUTH_SERVER_PORT", "3000");
+    // Remove auth port from environment variables since it's fixed
     const char* game_port_str = getEnvOrDefault("GAME_SERVER_PORT", "8080");
-    
-    int auth_port = atoi(auth_port_str);
     int game_port = atoi(game_port_str);
 
     if (!server_id || !server_token) {
@@ -295,10 +303,14 @@ int main() {
         return -1;
     }
 
-    // Initialize database client and ensure it's connected before accepting players
-    GameServer server = {0};
-    if (!initDatabaseClient(&server.dbClient, auth_host, auth_port, 
-                           server_id, server_token, CONN_TYPE_TCP)) {
+    // Update structure name
+    DatabaseState dbState = {0};
+    dbState.lastHealthCheck = 0;
+    dbState.isDbHealthy = false;
+
+    // Update references
+    if (!db_client_init(&dbState.dbClient, auth_host, 3001, 
+                       server_id, server_token)) {
         fprintf(stderr, "Failed to initialize database client\n");
         return 1;
     }
@@ -309,8 +321,8 @@ int main() {
     bool db_ready = false;
 
     while (!db_ready && retry_count < 5) {
-        if (checkDatabaseHealth(&server.dbClient, &health)) {
-            // Connection is good and we got a valid health response
+        // Changed db_client_verify to db_client_ping since that's the correct function
+        if (db_client_ping(&dbState.dbClient)) {
             db_ready = true;
             logDebug("Database connection established and healthy");
             break;
@@ -328,7 +340,7 @@ int main() {
     // Now we can proceed with game server initialization
     // Now initialize player manager with authenticated db client
     PlayerConnectionManager playerManager;
-    if (!initPlayerConnectionManager(&playerManager, &server.dbClient, worldId)) {
+    if (!initPlayerConnectionManager(&playerManager, &dbState.dbClient, worldId)) {
         fprintf(stderr, "Failed to initialize player connection manager\n");
         return 1;
     }
@@ -377,20 +389,21 @@ int main() {
         }
 
         // Database health check
-        if (currentTime - server.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL) {
-            bool prevHealth = server.isDbHealthy;
-            server.isDbHealthy = checkDatabaseHealth(&server.dbClient, &server.dbHealth);
+        if (currentTime - dbState.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL) {
+            bool prevHealth = dbState.isDbHealthy;
+            dbState.isDbHealthy = db_client_ping(&dbState.dbClient);
             
-            if (server.isDbHealthy) {
-                logDebug("DB Health: OK, Latency: %dms, Memory: %llu/%llu MB",
-                        server.dbHealth.db_latency,
-                        server.dbHealth.memory_used / (1024*1024),
-                        server.dbHealth.memory_total / (1024*1024));
+            if (dbState.isDbHealthy) {
+                if (dbState.reconnecting) {
+                    logDebug("Database connection restored");
+                    dbState.reconnecting = false;
+                }
             } else if (prevHealth) {
                 logDebug("WARNING: Database connection lost!");
+                dbState.reconnecting = true;
             }
             
-            server.lastHealthCheck = currentTime;
+            dbState.lastHealthCheck = currentTime;
         }
 
         // Handle any new player connections
@@ -434,9 +447,9 @@ int main() {
         }
 
         // Draw database status indicator
-        DrawText(server.isDbHealthy ? "DB: OK" : "DB: ERROR",
+        DrawText(dbState.isDbHealthy ? "DB: OK" : "DB: ERROR",
                 10, GetScreenHeight() - 30, 20,
-                server.isDbHealthy ? GREEN : RED);
+                dbState.isDbHealthy ? GREEN : RED);
         
         EndDrawing();
         
@@ -460,7 +473,7 @@ int main() {
     cleanupPlayerConnectionManager(&playerManager);
     closeAdminWindow(&adminWindow);
     stopAdminConsole(&adminConsole);
-    cleanupDatabaseClient(&server.dbClient);
+    db_client_cleanup(&dbState.dbClient);
     b2DestroyWorld(worldId);
     ws_stop_server();
     CloseWindow();

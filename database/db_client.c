@@ -38,12 +38,16 @@
 #define TCP_KEEPINTVL  2    /* Interval between keepalives */
 #endif
 
+// Add constants at the top with other defines
+#define MAX_MISSED_PONGS 3
+#define RECONNECT_MAX_ATTEMPTS 5
+#define RECONNECT_BACKOFF_MS 1000
+
 // Forward declare static functions
 static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp);
 static size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata);
 static bool parseHealthResponse(const uint8_t* buffer, size_t size, DatabaseHealth* health);
 static bool initializeHealthCheck(DatabaseClient* client);
-static void onWebSocketMessage(void* context, WebSocket* ws, const uint8_t* data, size_t length);
 static bool sendAuthRequest(DatabaseClient* client);
 static bool readMultiPartMessage(DatabaseClient* client, uint8_t* buffer, size_t* total_size);
 static bool sendMessage(DatabaseClient* client, uint8_t type, const void* payload, uint32_t length);
@@ -78,16 +82,7 @@ static size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* use
     return totalSize;
 }
 
-static volatile bool ws_connected = false;
-static volatile bool ws_connecting = false;  // Add this flag
-
 // Add ping/pong tracking
-static struct {
-    bool ping_pending;
-    time_t last_ping;
-    time_t last_pong;
-} ws_state = {0};
-
 static const uint32_t retry_ms_table[] = {
     2000,    // First retry after 2s
     4000,    // Second retry after 4s
@@ -230,7 +225,7 @@ static bool initializeHealthCheck(DatabaseClient* client) {
         fprintf(stderr, "[DB] Failed to set TCP keepalive interval: %s\n", strerror(errno));
     }
 
-    // Setup address for port 3001
+    // Always use port 3001 regardless of what was passed to init
     struct sockaddr_in server = {0};
     server.sin_family = AF_INET;
     server.sin_port = htons(3001);
@@ -488,7 +483,6 @@ static bool parseHealthResponse(const uint8_t* buffer, size_t size, DatabaseHeal
 
 // Add helper function to validate values
 bool validateHealthValues(const DatabaseHealth* health) {
-    // Add reasonable limits
     const uint32_t MAX_LATENCY_MS = 60000;  // 60 seconds
     const uint64_t MAX_MEMORY = 1024ULL * 1024ULL * 1024ULL * 1024ULL;  // 1 TB
     
@@ -673,19 +667,9 @@ void cleanupDatabaseClient(DatabaseClient* client) {
     free(client->server_token);  // Free server token
 }
 
-static void onWebSocketMessage(void* context, WebSocket* ws, const uint8_t* data, size_t length) {
-    DatabaseClient* client = (DatabaseClient*)context;
-    
-    if (length >= 42 && data[0] == MSG_HEALTH_CHECK) {
-        if (parseHealthResponse(data, length, &client->last_health)) {
-            client->last_health_check = time(NULL);
-        }
-    }
-}
-
+// Update init function implementation to match new signature
 bool initDatabaseClient(DatabaseClient* client, const char* host, int port,
-                       const char* server_id, const char* server_token,
-                       ConnectionType type) {
+                       const char* server_id, const char* server_token) {
     client->host = strdup(host);
     client->port = port;
     client->server_id = strdup(server_id);
@@ -696,52 +680,47 @@ bool initDatabaseClient(DatabaseClient* client, const char* host, int port,
         return false;
     }
     
-    client->conn_type = type;
-    
-    if (type == CONN_TYPE_WEBSOCKET) {
-        // Initialize WebSocket
-        client->ws.host = client->host;
-        client->ws.port = client->port;
-        client->ws.path = "/ws/health";
-        client->ws.auth_id = client->server_id;
-        client->ws.auth_token = client->server_token;
-        ws_set_message_handler(&client->ws, onWebSocketMessage, client);
-    }
-    
-    client->sequence = 0;  // Initialize sequence number
+    client->sequence = 0;
     client->connected = false;
-    
     client->state = CONN_STATE_DISCONNECTED;
     client->auth_complete = false;
-    client->auth_success = false;  // Add this explicit init
+    client->auth_success = false;
+
+    client->missed_pongs = 0;
+    client->last_successful_ping = 0;
+    client->reconnect_attempts = 0;
+    client->is_reconnecting = false;
 
     return true;
 }
 
 static bool sendAuthRequest(DatabaseClient* client) {
-    // Prepare fixed-size auth payload
-    AuthPayload payload = {0};  // Initialize to zeros for null padding
+    AuthRequestPayload payload = {0};
     
-    // Copy credentials with length checks
     size_t id_len = strlen(client->server_id);
     size_t token_len = strlen(client->server_token);
     
-    if (id_len > sizeof(payload.server_id) || token_len > sizeof(payload.token)) {
+    if (id_len > sizeof(payload.server_id) || token_len > sizeof(payload.auth_token)) {
         fprintf(stderr, "[DB] Credentials too long: id=%zu, token=%zu\n", 
                 id_len, token_len);
         return false;
     }
     
-    // Copy raw server_id and token - NOT hashed
     memcpy(payload.server_id, client->server_id, id_len);
-    memcpy(payload.token, client->server_token, token_len);
+    memcpy(payload.auth_token, client->server_token, token_len); // Changed from token to auth_token
+    
+    // Add size verification logging
+    fprintf(stderr, "[DB] Auth request breakdown:\n");
+    fprintf(stderr, "  - Header size: %zu bytes\n", sizeof(MessageHeader));
+    fprintf(stderr, "  - Payload size: %zu bytes\n", sizeof(AuthRequestPayload));
+    fprintf(stderr, "  - Total size: %zu bytes\n", sizeof(MessageHeader) + sizeof(AuthRequestPayload));
     
     // Prepare header
     MessageHeader header = {
         .type = MSG_AUTH_REQUEST,
         .version = 1,
         .sequence = client->sequence++,
-        .length = sizeof(AuthPayload)
+        .length = sizeof(AuthRequestPayload)  // Should be 288
     };
     
     fprintf(stderr, "[DB] Sending auth request: type=0x%02x, version=%d, seq=%d, len=%d\n",
@@ -854,4 +833,128 @@ static bool skipMessagePayload(int sock, size_t length) {
         remaining -= bytes;
     }
     return true;
+}
+
+// Add ping implementation
+bool db_client_ping(DatabaseClient* client) {
+    time_t now = time(NULL);
+
+    // Check if we need to reconnect
+    if (client->missed_pongs >= MAX_MISSED_PONGS && !client->is_reconnecting) {
+        fprintf(stderr, "[DB] Too many missed pongs (%d), initiating reconnection\n", 
+                client->missed_pongs);
+        client->is_reconnecting = true;
+        client->state = CONN_STATE_DISCONNECTED;
+        close(client->sock);
+        client->sock = -1;
+    }
+
+    // Handle reconnection
+    if (client->is_reconnecting) {
+        if (client->reconnect_attempts >= RECONNECT_MAX_ATTEMPTS) {
+            fprintf(stderr, "[DB] Max reconnection attempts reached\n");
+            return false;
+        }
+
+        // Exponential backoff
+        usleep(RECONNECT_BACKOFF_MS * (1 << client->reconnect_attempts));
+        client->reconnect_attempts++;
+
+        if (db_client_connect(client)) {
+            fprintf(stderr, "[DB] Reconnection successful on attempt %d\n", 
+                    client->reconnect_attempts);
+            client->is_reconnecting = false;
+            client->missed_pongs = 0;
+            client->reconnect_attempts = 0;
+            client->last_successful_ping = now;
+            return true;
+        }
+        return false;
+    }
+
+    // Normal ping logic
+    if (client->state != CONN_STATE_CONNECTED) {
+        if (!db_client_connect(client)) {
+            return false;
+        }
+    }
+
+    MessageHeader header = {
+        .type = MSG_PING,
+        .version = MESSAGE_VERSION,
+        .sequence = client->sequence++,
+        .length = 0
+    };
+
+    if (send(client->sock, &header, sizeof(header), MSG_NOSIGNAL) != sizeof(header)) {
+        client->missed_pongs++;
+        fprintf(stderr, "[DB] Failed to send ping (missed pongs: %d)\n", 
+                client->missed_pongs);
+        return false;
+    }
+
+    // Check for pong response
+    uint8_t buffer[sizeof(MessageHeader)];
+    struct timeval tv = {.tv_sec = 1, .tv_usec = 0}; // 1 second timeout
+    setsockopt(client->sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), MSG_DONTWAIT);
+    if (bytes == sizeof(MessageHeader)) {
+        MessageHeader* response = (MessageHeader*)buffer;
+        if (response->type == MSG_PONG) {
+            client->missed_pongs = 0;
+            client->last_successful_ping = now;
+            return true;
+        }
+    }
+
+    client->missed_pongs++;
+    return false;
+}
+
+// Add db_client_connect implementation
+bool db_client_connect(DatabaseClient* client) {
+    // Try to establish initial connection
+    if (!initializeHealthCheck(client)) {
+        return false;
+    }
+
+    // Wait for authentication to complete
+    time_t start = time(NULL);
+    while (time(NULL) - start < 5) {  // 5 second timeout
+        if (client->state == CONN_STATE_CONNECTED) {
+            // After auth, expect SERVER_INFO message
+            uint8_t buffer[1024];
+            uint8_t type;
+            uint32_t length;
+            
+            if (readMessage(client, &type, buffer, &length)) {
+                if (type == MSG_SERVER_INFO && length >= sizeof(ServerInfoPayload)) {
+                    memcpy(&client->server_info, buffer, sizeof(ServerInfoPayload));
+                    fprintf(stderr, "[DB] Got server info - version: %d, max_players: %d\n",
+                            client->server_info.version,
+                            client->server_info.max_players);
+                    return true;
+                }
+            }
+        }
+        usleep(100000);  // 100ms wait between checks
+    }
+
+    fprintf(stderr, "[DB] Connection timeout waiting for server info\n");
+    return false;
+}
+
+// Update function names to match declarations
+bool db_client_init(DatabaseClient* client, const char* host, int port,
+                   const char* server_id, const char* server_token) {
+    return initDatabaseClient(client, host, port, server_id, server_token);
+}
+
+void db_client_cleanup(DatabaseClient* client) {
+    cleanupDatabaseClient(client);
+}
+
+bool db_client_verify_token(DatabaseClient* client, const char* token, TokenVerifyResult* result) {
+    return verifyUserToken(client, token, result);
 }

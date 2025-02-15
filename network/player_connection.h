@@ -45,5 +45,6 @@ void removeDisconnectedPlayers(PlayerConnectionManager* manager);
 void cleanupPlayerConnectionManager(PlayerConnectionManager* manager);
 void handlePlayerInput(PlayerConnection* player, const uint8_t* data, size_t length, PlayerConnectionManager* manager);
 void sendPlayerState(PlayerConnection* player, PlayerConnectionManager* manager);
+bool verifyUserToken(DatabaseClient* client, const char* token, TokenVerifyResult* result);
 
 #endif
