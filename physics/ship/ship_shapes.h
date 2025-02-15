@@ -3,7 +3,7 @@
 
 #include <raylib.h>
 #include <box2d/box2d.h>
-#include "game_state.h"
+#include "../core/includes.h"
 
 // Forward declare GameServer to avoid circular dependency
 struct GameServer;

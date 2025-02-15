@@ -3,20 +3,13 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include "ship_shapes.h"
-#include "db_client.h"
-#include "net_protocol.h"
-#include "game_state.h"
 #include <signal.h>
-#include "admin_console.h"
-#include "admin_window.h"
 #include <time.h>
-#include "coord_utils.h"
-#include "env_loader.h"
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
-#include "player_connection.h"
+
+#include "includes.h"
 
 // Unified timing constants
 #define PHYSICS_UPDATE_HZ 60        // Physics runs at 60Hz
@@ -335,7 +328,7 @@ int main() {
     // Now we can proceed with game server initialization
     // Now initialize player manager with authenticated db client
     PlayerConnectionManager playerManager;
-    if (!initPlayerConnectionManager(&playerManager, &server.dbClient)) {
+    if (!initPlayerConnectionManager(&playerManager, &server.dbClient, worldId)) {
         fprintf(stderr, "Failed to initialize player connection manager\n");
         return 1;
     }
@@ -410,6 +403,9 @@ int main() {
                 free(ws);
             }
         }
+
+        // Check for disconnected players
+        removeDisconnectedPlayers(&playerManager);
 
         BeginDrawing();
         ClearBackground(RAYWHITE);

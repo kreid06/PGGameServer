@@ -1,5 +1,4 @@
 #include "websocket.h"
-#include "net_protocol.h" // Add this to get message type definitions
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
@@ -166,15 +165,16 @@ WebSocket* ws_accept_connection(void) {
         char* token_end = strpbrk(token_start, " \r\n&");
         if (token_end) {
             size_t token_len = token_end - token_start;
-            if (token_len < sizeof(ws_server.current_token)) {
-                memcpy(ws_server.current_token, token_start, token_len);
-                ws_server.current_token[token_len] = '\0';
-                fprintf(stderr, "[WS] Extracted token length: %zu\n", token_len);
+            if (token_len < sizeof(ws->token)) {
+                memcpy(ws->token, token_start, token_len);
+                ws->token[token_len] = '\0';
+                ws->token_received = true;
+                fprintf(stderr, "[WS] Stored token in WebSocket (length: %zu)\n", token_len);
             }
         }
     } else {
         fprintf(stderr, "[WS] No token found in request\n");
-        // Still continue with handshake
+        ws->token_received = false;
     }
 
     // Now handle WebSocket handshake
@@ -215,6 +215,14 @@ WebSocket* ws_accept_connection(void) {
     fprintf(stderr, "[WS] WebSocket handshake complete, connection ready\n");
 
     return ws;
+}
+
+// Add function to get token from WebSocket
+const char* ws_get_token(const WebSocket* ws) {
+    if (!ws || !ws->token_received) {
+        return NULL;
+    }
+    return ws->token;
 }
 
 void ws_stop_server(void) {
@@ -345,28 +353,18 @@ bool ws_send_binary(WebSocket* ws, const uint8_t* data, size_t len) {
     return true;
 }
 
-void ws_set_message_handler(WebSocket* ws, void (*handler)(void*, const uint8_t*, size_t)) {
-    if (ws) {
-        ws->on_message = handler;
-    }
+// Update implementation to match new signature
+void ws_set_message_handler(WebSocket* ws, WebSocketMessageHandler handler, void* context) {
+    if (!ws) return;
+    ws->handler = handler;
+    ws->handler_context = context;
 }
 
-bool ws_send_health_check(WebSocket* ws) {
-    if (!ws || !ws->connected) {
-        fprintf(stderr, "[WS] Cannot send health check - websocket not connected\n");
-        return false;
+// Update message processing to use new handler signature
+static void process_websocket_message(WebSocket* ws, const uint8_t* data, size_t length) {
+    if (ws->handler) {
+        ws->handler(ws->handler_context, ws, data, length);
     }
-
-    // Create health check message
-    uint8_t health_check[] = {
-        MSG_HEALTH_CHECK,  // Message type
-        0x01,             // Version 1
-        0x00, 0x00,      // Sequence number (not used for health checks)
-        0x00, 0x00, 0x00, 0x00  // Length = 0
-    };
-
-    // Send using binary frame
-    return ws_send_binary(ws, health_check, sizeof(health_check));
 }
 
 bool ws_parse_connect_url(const char* url, char* host, int* port, char* token) {
@@ -406,6 +404,14 @@ char* ws_build_connect_url(const char* host, int port, const char* token) {
     
     return url;
 }
+
+// Remove or comment out health check function until implemented
+/*
+bool ws_send_health_check(WebSocket* ws) {
+    // This will be implemented in a future iteration
+    return true;
+}
+*/
 
 // ... rest of existing code ...
 

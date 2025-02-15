@@ -1,8 +1,8 @@
 #ifndef DB_CLIENT_H
 #define DB_CLIENT_H
 
-#include "net_protocol.h"
-#include "websocket.h"  // Add this for WebSocket implementation
+#include "./network/db_protocol.h"
+#include "../network/websockets/websocket.h"  // Add this for WebSocket implementation
 #include <curl/curl.h>
 #include <time.h>
 #include <stdbool.h>

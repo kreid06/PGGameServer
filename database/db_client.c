@@ -43,13 +43,13 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 static size_t HeaderCallback(char* buffer, size_t size, size_t nitems, void* userdata);
 static bool parseHealthResponse(const uint8_t* buffer, size_t size, DatabaseHealth* health);
 static bool initializeHealthCheck(DatabaseClient* client);
-static void sendWebSocketHealthCheck(DatabaseClient* client);
-static void onWebSocketMessage(void* user, const uint8_t* data, size_t len);
+static void onWebSocketMessage(void* context, WebSocket* ws, const uint8_t* data, size_t length);
 static bool sendAuthRequest(DatabaseClient* client);
 static bool readMultiPartMessage(DatabaseClient* client, uint8_t* buffer, size_t* total_size);
 static bool sendMessage(DatabaseClient* client, uint8_t type, const void* payload, uint32_t length);
 static bool readMessage(DatabaseClient* client, uint8_t* type, void* payload, uint32_t* length);
 static bool skipMessagePayload(int sock, size_t length);
+static bool waitForVerifyResponse(DatabaseClient* client, TokenVerifyResult* result);
 
 // Health check packet: [0x04][00 00 00 00]
 static uint8_t health_check_packet[] = {
@@ -535,6 +535,107 @@ static bool sendCompleteMessage(DatabaseClient* client, uint8_t type, const void
     return success;
 }
 
+static bool waitForVerifyResponse(DatabaseClient* client, TokenVerifyResult* result) {
+    uint8_t buffer[1024];
+    time_t start_time = time(NULL);
+    const int MAX_WAIT_SECS = 5;
+
+    // First try reading any queued messages
+    int flags = fcntl(client->sock, F_GETFL, 0);
+    fcntl(client->sock, F_SETFL, flags | O_NONBLOCK);
+
+    // Clear any pending health responses first
+    fprintf(stderr, "[DB] Clearing pending messages before verification...\n");
+    while (time(NULL) - start_time < 1) {  // Quick clean for 1 second
+        ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), MSG_DONTWAIT);
+        if (bytes <= 0) break;  // No more pending messages
+        
+        if (bytes >= sizeof(MessageHeader)) {
+            MessageHeader* header = (MessageHeader*)buffer;
+            fprintf(stderr, "[DB] Skipping message type 0x%02x len=%d\n", 
+                    header->type, header->length);
+            if (header->length > 0) {
+                skipMessagePayload(client->sock, header->length);
+            }
+        }
+    }
+
+    // Now set blocking and wait for verify response
+    fcntl(client->sock, F_SETFL, flags & ~O_NONBLOCK);
+    fprintf(stderr, "[DB] Now waiting for verification response...\n");
+
+    while (time(NULL) - start_time < MAX_WAIT_SECS) {
+        ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), 0);
+        if (bytes < sizeof(MessageHeader)) {
+            fprintf(stderr, "[DB] Received incomplete message: %zd bytes\n", bytes);
+            continue;
+        }
+
+        MessageHeader* resp = (MessageHeader*)buffer;
+        fprintf(stderr, "[DB] Received message type 0x%02x len=%d\n", 
+                resp->type, resp->length);
+
+        switch (resp->type) {
+            case MSG_VERIFY_TOKEN:
+                if (resp->length < 1) {
+                    fprintf(stderr, "[DB] Invalid verify response: missing status byte\n");
+                    return false;
+                }
+
+                uint8_t status = buffer[sizeof(MessageHeader)];
+                result->success = (status == 1);
+                fprintf(stderr, "[DB] Token verify status: %d\n", status);
+
+                if (result->success && resp->length >= 5) {
+                    memcpy(&result->data.player_id, 
+                           buffer + sizeof(MessageHeader) + 1, 
+                           sizeof(uint32_t));
+                    fprintf(stderr, "[DB] Token verified for player %u\n", 
+                            result->data.player_id);
+                    return true;
+                } else if (!result->success) {
+                    size_t error_len = resp->length - 1;
+                    if (error_len > 0) {
+                        if (error_len >= sizeof(result->data.error)) {
+                            error_len = sizeof(result->data.error) - 1;
+                        }
+                        memcpy(result->data.error, 
+                               buffer + sizeof(MessageHeader) + 1, 
+                               error_len);
+                        result->data.error[error_len] = '\0';
+                        fprintf(stderr, "[DB] Token verification failed: %s\n", 
+                                result->data.error);
+                    } else {
+                        strcpy(result->data.error, "Unknown verification error");
+                        fprintf(stderr, "[DB] Token verification failed with no error message\n");
+                    }
+                    return false;
+                }
+                break;
+
+            case MSG_HEALTH_RESPONSE:
+            case MSG_SERVER_INFO:
+                fprintf(stderr, "[DB] Skipping non-verify message type 0x%02x\n", 
+                        resp->type);
+                if (resp->length > 0) {
+                    skipMessagePayload(client->sock, resp->length);
+                }
+                continue;
+
+            default:
+                fprintf(stderr, "[DB] Unexpected message type 0x%02x\n", resp->type);
+                if (resp->length > 0) {
+                    skipMessagePayload(client->sock, resp->length);
+                }
+                continue;
+        }
+    }
+
+    fprintf(stderr, "[DB] Token verification timed out\n");
+    strcpy(result->data.error, "Verification timeout");
+    return false;
+}
+
 bool verifyUserToken(DatabaseClient* client, const char* token, TokenVerifyResult* result) {
     // First ensure we have an active connection
     if (client->state != CONN_STATE_CONNECTED) {
@@ -559,50 +660,8 @@ bool verifyUserToken(DatabaseClient* client, const char* token, TokenVerifyResul
 
     fprintf(stderr, "[DB] Sent token verification request - %zu bytes sent\n", total_message_size);
 
-    // Read response with timeout
-    uint8_t buffer[1024];
-    ssize_t bytes = recv(client->sock, buffer, sizeof(buffer), 0);
-    if (bytes < sizeof(MessageHeader)) {
-        fprintf(stderr, "[DB] Invalid verify response\n"); 
-        return false;
-    }
-
-    MessageHeader* resp = (MessageHeader*)buffer;
-    if (resp->type != MSG_VERIFY_TOKEN) {
-        fprintf(stderr, "[DB] Unexpected response type 0x%02x\n", resp->type);
-        return false;
-    }
-
-    // Parse verification response:
-    // [Header][success byte][player_id or error message]
-    if (resp->length < 1) {
-        fprintf(stderr, "[DB] Invalid verify response length\n");
-        return false;
-    }
-
-    uint8_t success = buffer[sizeof(MessageHeader)];
-    result->success = success;
-
-    if (success) {
-        // Copy player ID from response
-        if (resp->length != 5) {  // 1 byte success + 4 bytes player_id
-            fprintf(stderr, "[DB] Invalid success response length: %d\n", resp->length);
-            return false;
-        }
-        memcpy(&result->data.player_id, buffer + sizeof(MessageHeader) + 1, sizeof(uint32_t));
-        fprintf(stderr, "[DB] Token verified for player %u\n", result->data.player_id);
-    } else {
-        // Copy error message
-        size_t error_len = resp->length - 1;  // -1 for success byte
-        if (error_len >= sizeof(result->data.error)) {
-            error_len = sizeof(result->data.error) - 1;
-        }
-        memcpy(result->data.error, buffer + sizeof(MessageHeader) + 1, error_len);
-        result->data.error[error_len] = '\0';
-        fprintf(stderr, "[DB] Token verification failed: %s\n", result->data.error);
-    }
-
-    return true;
+    // Wait for response with timeout
+    return waitForVerifyResponse(client, result);
 }
 
 void cleanupDatabaseClient(DatabaseClient* client) {
@@ -614,11 +673,11 @@ void cleanupDatabaseClient(DatabaseClient* client) {
     free(client->server_token);  // Free server token
 }
 
-static void onWebSocketMessage(void* user, const uint8_t* data, size_t len) {
-    DatabaseClient* client = (DatabaseClient*)user;
+static void onWebSocketMessage(void* context, WebSocket* ws, const uint8_t* data, size_t length) {
+    DatabaseClient* client = (DatabaseClient*)context;
     
-    if (len >= 42 && data[0] == MSG_HEALTH_CHECK) {
-        if (parseHealthResponse(data, len, &client->last_health)) {
+    if (length >= 42 && data[0] == MSG_HEALTH_CHECK) {
+        if (parseHealthResponse(data, length, &client->last_health)) {
             client->last_health_check = time(NULL);
         }
     }
@@ -646,7 +705,7 @@ bool initDatabaseClient(DatabaseClient* client, const char* host, int port,
         client->ws.path = "/ws/health";
         client->ws.auth_id = client->server_id;
         client->ws.auth_token = client->server_token;
-        ws_set_message_handler(&client->ws, onWebSocketMessage);
+        ws_set_message_handler(&client->ws, onWebSocketMessage, client);
     }
     
     client->sequence = 0;  // Initialize sequence number
@@ -657,14 +716,6 @@ bool initDatabaseClient(DatabaseClient* client, const char* host, int port,
     client->auth_success = false;  // Add this explicit init
 
     return true;
-}
-
-static void sendWebSocketHealthCheck(DatabaseClient* client) {
-    if (client->ws.connected) {
-        if (!ws_send_health_check(&client->ws)) {
-            fprintf(stderr, "[DB] Failed to send WebSocket health check\n");
-        }
-    }
 }
 
 static bool sendAuthRequest(DatabaseClient* client) {

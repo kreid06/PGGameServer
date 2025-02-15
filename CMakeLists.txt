@@ -27,7 +27,14 @@ endif()
 
 # Include directories
 include_directories(
-    ${CMAKE_SOURCE_DIR}/external  # Nuklear
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/core
+    ${CMAKE_SOURCE_DIR}/network
+    ${CMAKE_SOURCE_DIR}/database
+    ${CMAKE_SOURCE_DIR}/physics
+    ${CMAKE_SOURCE_DIR}/world        # Make sure world is included
+    ${CMAKE_SOURCE_DIR}/UI
+    ${CMAKE_SOURCE_DIR}/.external  # Nuklear
     ${OPENSSL_INCLUDE_DIR}        # Changed from previous
     ${CURL_INCLUDE_DIRS}
 )
@@ -38,16 +45,18 @@ set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-O3")
 
 # Common source files
 set(COMMON_SOURCES
-    main.c
-    ship_shapes.c
-    admin_console.c
-    admin_window.c
-    coord_utils.c
-    external/nuklear_raylib.c
-    db_client.c
-    net_protocol.c
+    .external/nuklear_raylib.c
+    core/main.c
+    physics/ship/ship_shapes.c
+    UI/admin_console.c
+    UI/admin_window.c
+    world/coord_utils.c
+    database/db_client.c
+    database/network/db_protocol.c
+    network/websockets/websocket.c
+    network/player_connection.c
+    physics/player/player_physics.c
     env_loader.c
-    websocket.c
 )
 
 # Release build
@@ -62,16 +71,14 @@ target_link_libraries(game_dashboard PRIVATE
     ${OPENSSL_SSL_LIBRARIES}
     ${OPENSSL_CRYPTO_LIBRARIES}
 )
-target_compile_options(game_dashboard PRIVATE -O3 -march=native -flto)
-target_sources(game_dashboard PRIVATE
-    player_connection.c
-)
+# target_compile_options(game_dashboard PRIVATE -O3 -march=native -flto)
+# target_sources(game_dashboard PRIVATE
+#     network/player_connection.c
+# )
 
-# Debug build
-add_executable(game_dashboard_debug ${COMMON_SOURCES})
-target_include_directories(game_dashboard_debug PRIVATE ${BOX2D_INCLUDE_DIR})
-target_link_libraries(game_dashboard_debug PRIVATE
-    ${BOX2D_LIBRARY}
+# Ensure proper Box2D linkage
+target_link_libraries(game_dashboard PRIVATE
+    box2d
     raylib
     m
     pthread
@@ -79,7 +86,6 @@ target_link_libraries(game_dashboard_debug PRIVATE
     ${OPENSSL_SSL_LIBRARIES}
     ${OPENSSL_CRYPTO_LIBRARIES}
 )
-target_compile_options(game_dashboard_debug PRIVATE -g -O0)
-target_sources(game_dashboard_debug PRIVATE
-    player_connection.c
-)
+
+
+

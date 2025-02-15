@@ -1,0 +1,15 @@
+
+// Basic Key Flags (first 8 bits)
+W key (Forward)    = 0000 0001  (0x01)
+S key (Backward)   = 0000 0010  (0x02)
+A key (Left)       = 0000 0100  (0x04)
+D key (Right)      = 0000 1000  (0x08)
+Shift (Boost)      = 0001 0000  (0x10)
+Mouse1            = 0010 0000  (0x20)
+Mouse2            = 0100 0000  (0x40)
+Space (Brake)     = 1000 0000  (0x80)
+
+// Input States (next 8 bits)
+Just Pressed      = 0000 0001 0000 0000  (0x0100)
+Just Released     = 0000 0010 0000 0000  (0x0200)
+Key Held          = 0000 0100 0000 0000  (0x0400)

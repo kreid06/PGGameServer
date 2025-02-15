@@ -1,10 +1,11 @@
 #ifndef ADMIN_WINDOW_H
 #define ADMIN_WINDOW_H
 
-#include "game_state.h"
-#include <raylib.h>
-#include "external/nuklear_raylib.h"
 #include <stdio.h>
+#include <raylib.h>
+
+#include "../.external/nuklear_raylib.h"
+#include "../core/includes.h"
 
 // Define GuiButton structure (move from main.c)
 typedef struct {

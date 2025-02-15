@@ -235,3 +235,33 @@ bool isMessageComplete(const MessageAssembler* assembler);
 uint8_t* getCompleteMessage(MessageAssembler* assembler, size_t* total_length);
 
 #endif // NET_PROTOCOL_H
+
+#ifndef DB_PROTOCOL_H
+#define DB_PROTOCOL_H
+
+#include "../../network/common_protocol.h"
+
+// Database message types (0x01-0x1F)
+#define DB_MSG_NONE           0x00
+#define DB_MSG_AUTH_REQUEST   0x01
+#define DB_MSG_AUTH_RESPONSE  0x02
+#define DB_MSG_ERROR          0x0F
+#define DB_MSG_PLAYER_STATE   0x10
+#define DB_MSG_ENTITY_UPDATE  0x11
+#define DB_MSG_WORLD_STATE    0x12
+
+typedef struct {
+    CommonMessageHeader header;
+    // ... rest of existing fields ...
+} __attribute__((packed)) DbMessageHeader;
+
+// ... rest of existing typedefs with DB_ prefix ...
+
+typedef struct {
+    DbMessageHeader header;
+    uint8_t status;
+    uint32_t player_id;
+    uint32_t world_seed;
+} __attribute__((packed)) DbAuthResponseMessage;
+
+#endif

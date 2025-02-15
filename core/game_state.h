@@ -3,8 +3,8 @@
 
 #include <raylib.h>
 #include <box2d/box2d.h>
-#include "db_client.h"    // Add this include for DatabaseClient
-#include "net_protocol.h" // Add this include for DatabaseHealth
+#include "../database/db_client.h"    // Add this include for DatabaseClient
+#include "../database/network/db_protocol.h" // Add this include for DatabaseHealth
 
 // Unified scale constants
 #define PIXELS_PER_METER 100.0f       // Screen pixels per physics meter

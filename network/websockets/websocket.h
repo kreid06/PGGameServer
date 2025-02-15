@@ -26,8 +26,16 @@
     "Connection: Upgrade\r\n" \
     "Sec-WebSocket-Accept: %s\r\n\r\n"
 
-typedef struct {
-    int sock;  // Changed from sock_fd to sock
+// Forward declare WebSocket struct
+struct WebSocket;
+typedef struct WebSocket WebSocket;
+
+// Now we can define the message handler type
+typedef void (*WebSocketMessageHandler)(void* context, WebSocket* ws, const uint8_t* data, size_t len);
+
+// Define the actual WebSocket structure
+struct WebSocket {
+    int sock;
     char* host;
     int port;
     char* path;
@@ -44,12 +52,17 @@ typedef struct {
     bool handshake_complete;
     bool initialized;     // Add initialization flag
     bool valid;          // Add validity check
-} WebSocket;
+    char token[1024];        // Add token storage to WebSocket struct
+    bool token_received;     // Flag to indicate if token was received
+    WebSocketMessageHandler handler;  // Add handler field
+    void* handler_context;           // Add context field
+};
 
 // Core WebSocket functions
 bool ws_connect(WebSocket* ws);
 void ws_disconnect(WebSocket* ws);
 bool ws_send_binary(WebSocket* ws, const uint8_t* data, size_t len);
+const char* ws_get_token(const WebSocket* ws);  // Add this function declaration
 bool ws_send_ping(WebSocket* ws);
 bool ws_send_pong(WebSocket* ws);
 void ws_handle_ping(WebSocket* ws);
@@ -62,9 +75,9 @@ const char* ws_get_connect_token(void);
 WebSocket* ws_accept_connection(void);
 void ws_stop_server(void);
 
-// Add missing declarations
-void ws_set_message_handler(WebSocket* ws, void (*handler)(void*, const uint8_t*, size_t));
-bool ws_send_health_check(WebSocket* ws);  // New function to replace sendWebSocketHealthCheck
+// Update function declaration with context parameter
+void ws_set_message_handler(WebSocket* ws, WebSocketMessageHandler handler, void* context);
+// bool ws_send_health_check(WebSocket* ws);  // New function to replace sendWebSocketHealthCheck
 
 // Add URL helper functions
 bool ws_parse_connect_url(const char* url, char* host, int* port, char* token);

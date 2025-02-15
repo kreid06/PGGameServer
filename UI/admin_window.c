@@ -1,9 +1,7 @@
 #include "admin_window.h"
-#include "ship_shapes.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
-#include "coord_utils.h"
 
 extern void logDebug(const char* format, ...);  // Declare external logging function
 
