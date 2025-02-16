@@ -212,6 +212,40 @@ typedef struct {
     DatabaseHealth dbHealth;
 } DatabaseState;
 
+// Add status info structure after other typedefs
+typedef struct {
+    const char* text;
+    Color color;
+    const char* details;
+} ConnectionStatus;
+
+// Add helper function to get connection status
+ConnectionStatus getConnectionStatus(DatabaseState* dbState) {
+    ConnectionStatus status = {0};
+    
+    if (dbState->dbClient.is_reconnecting) {
+        status.text = "RECONNECTING";
+        status.color = YELLOW;
+        status.details = "Attempting to restore connection...";
+    } else if (dbState->isDbHealthy) {
+        if (dbState->dbClient.auth_success) {
+            status.text = "CONNECTED";
+            status.color = GREEN;
+            status.details = "System running normally";
+        } else {
+            status.text = "AUTH PENDING";
+            status.color = YELLOW;
+            status.details = "Waiting for authentication...";
+        }
+    } else {
+        status.text = "DISCONNECTED";
+        status.color = RED;
+        status.details = "Database connection lost";
+    }
+    
+    return status;
+}
+
 // Add this before main()
 void updateDatabaseState(DatabaseState* dbState, DatabaseClient* client) {
     if (!dbState || !client) return;
@@ -422,10 +456,26 @@ int main() {
 
         BeginDrawing();
         ClearBackground(RAYWHITE);
-        
+
+        // Draw connection status panel
+        ConnectionStatus status = getConnectionStatus(&dbState);
+        Rectangle statusPanel = {10, 10, 300, 100};
+        DrawRectangleRec(statusPanel, ColorAlpha(LIGHTGRAY, 0.3f));
+        DrawText("Database Status", 20, 20, 20, DARKGRAY);
+        DrawText(status.text, 20, 45, 24, status.color);
+        DrawText(status.details, 20, 75, 16, DARKGRAY);
+
+        // Draw ping stats if connected
+        if (dbState.isDbHealthy) {
+            char pingInfo[64];
+            snprintf(pingInfo, sizeof(pingInfo), "Last Ping: %lds ago", 
+                    time(NULL) - dbState.dbClient.ping_state.last_successful);
+            DrawText(pingInfo, 20, 95, 16, DARKGRAY);
+        }
+
         // Draw status banner if database is not connected
-        if (!dbState.isDbHealthy) {
-            DrawRectangle(0, 0, GetScreenWidth(), 30, ColorAlpha(RED, 0.8f));
+        if (!dbState.isDbHealthy ||dbState.dbClient.is_reconnecting) {
+            DrawRectangle(0, 0, GetScreenWidth(), 30, ColorAlpha(YELLOW, 0.8f));
             DrawText("DATABASE OFFLINE - Player connections disabled", 
                     10, 5, 20, WHITE);
         }
@@ -471,12 +521,6 @@ int main() {
             updateAdminWindow(&adminWindow);
         }
 
-        // Draw database status indicator
-        DrawText(dbState.isDbHealthy ? "DB: OK" : "DB: ERROR",
-                10, GetScreenHeight() - 30, 20,
-                dbState.isDbHealthy ? GREEN : RED);
-        
-        EndDrawing();
         
         // Log performance stats
         if (currentTime - lastFrameTime >= 5.0) {
