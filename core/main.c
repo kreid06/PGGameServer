@@ -8,6 +8,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
+#include <errno.h>
 
 #include "includes.h"
 #include "../database/db_client.h"  // Add database client header
@@ -18,7 +19,7 @@
 #define TARGET_FPS 60               // Target 60 FPS
 #define PHYSICS_TIME_STEP (1.0f / PHYSICS_UPDATE_HZ)
 #define VISUAL_TIME_STEP (1.0f / VISUAL_UPDATE_HZ)
-#define DB_HEALTH_CHECK_INTERVAL 5.0  // Check every 5 seconds
+#define DB_HEALTH_CHECK_INTERVAL 10.0  // Check every 10 seconds instead of 5
 
 // Update game camera based on input
 void UpdateGameCamera(Camera2DState* camera) {
@@ -208,18 +209,53 @@ typedef struct {
     DatabaseClient dbClient;
     time_t lastHealthCheck;
     bool isDbHealthy;
-    bool reconnecting;
     DatabaseHealth dbHealth;
 } DatabaseState;
+
+// Add this before main()
+void updateDatabaseState(DatabaseState* dbState, DatabaseClient* client) {
+    if (!dbState || !client) return;
+
+    // Check basic connection state
+    bool wasHealthy = dbState->isDbHealthy;
+    bool isConnected = client->state == CONN_STATE_CONNECTED && 
+                      client->auth_success && 
+                      client->net.connected;
+
+    // Verify connection is actually working
+    if (isConnected) {
+        // Send a quick probe message
+        MessageHeader probe = {0};
+        probe.type = MSG_PING;
+        probe.version = MESSAGE_VERSION;
+        probe.sequence = client->sequence++;
+        
+        if (send(client->net.sock, &probe, sizeof(probe), MSG_NOSIGNAL) < 0) {
+            fprintf(stderr, "Connection verification failed: %s\n", strerror(errno));
+            dbState->isDbHealthy = false;
+            return;
+        }
+        
+        // Connection appears valid
+        dbState->isDbHealthy = true;
+    } else {
+        dbState->isDbHealthy = false;
+    }
+
+    // Log state changes
+    if (dbState->isDbHealthy != wasHealthy) {
+        logDebug("Database connection state changed: %s -> %s",
+                wasHealthy ? "healthy" : "unhealthy",
+                dbState->isDbHealthy ? "healthy" : "unhealthy");
+    }
+}
 
 int main() {
     logDebug("Starting Game Dashboard initialization...");
     
+    // Initialize basic systems first
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_HIGHDPI);
-    logDebug("Config flags set");
-    
     InitWindow(1280, 720, "Game Dashboard");
-    logDebug("Window initialized");
     SetTargetFPS(TARGET_FPS);
     
     // Create physics world
@@ -227,25 +263,20 @@ int main() {
     worldDef.gravity = (b2Vec2){0.0f, 0.0f};
     worldDef.enableSleep = false;
     b2WorldId worldId = b2CreateWorld(&worldDef);
-    logDebug("Physics world created: %d", worldId);
+    logDebug("Core systems initialized");
 
-    // Initialize camera and ships
+    // Initialize visual components
     Camera2DState camera = {0};
     camera.zoom = 1.0f;
     initShipArray(&camera.ships, 10);
-    logDebug("Camera and ship array initialized");
-
-    // Initialize admin console
+    
     AdminConsole adminConsole;
     initAdminConsole(&adminConsole, worldId, &camera.ships);
-    logDebug("Admin console initialized");
     startAdminConsoleThread(&adminConsole);
-    logDebug("Admin console thread started");
-
-    // Initialize admin window
+    
     AdminWindow adminWindow;
     initAdminWindow(&adminWindow, worldId, &camera.ships, &camera);
-    logDebug("Admin window initialized");
+    logDebug("Visual components initialized");
 
     // Get executable path and workspace directory
     char exe_path[PATH_MAX];
@@ -303,137 +334,131 @@ int main() {
         return -1;
     }
 
-    // Update structure name
+    // Initialize database client in background
     DatabaseState dbState = {0};
     dbState.lastHealthCheck = 0;
     dbState.isDbHealthy = false;
 
-    // Update references
-    if (!db_client_init(&dbState.dbClient, auth_host, 3001, 
-                       server_id, server_token)) {
-        fprintf(stderr, "Failed to initialize database client\n");
-        return 1;
+    if (!db_client_init(&dbState.dbClient, auth_host, 3001, server_id, server_token)) {
+        logDebug("Warning: Failed to initialize database connection - continuing in offline mode");
+        // Continue without database connection
     }
 
-    // Wait for initial database connection and authentication
-    DatabaseHealth health;
-    int retry_count = 0;
-    bool db_ready = false;
-
-    while (!db_ready && retry_count < 5) {
-        // Changed db_client_verify to db_client_ping since that's the correct function
-        if (db_client_ping(&dbState.dbClient)) {
-            db_ready = true;
-            logDebug("Database connection established and healthy");
-            break;
-        }
-        logDebug("Waiting for database connection... attempt %d", retry_count + 1);
-        sleep(1);
-        retry_count++;
+    // Initialize player manager but don't require database connection
+    PlayerConnectionManager playerManager = {0};
+    playerManager.worldId = worldId;
+    playerManager.db_client = &dbState.dbClient;
+    
+    // Start WebSocket server but don't accept connections until database is ready
+    if (!ws_start_server(NULL, game_port)) {
+        logDebug("Warning: Failed to start WebSocket server - player connections disabled");
+    } else {
+        logDebug("WebSocket server started (waiting for database connection)");
     }
 
-    if (!db_ready) {
-        logDebug("Failed to establish database connection after %d attempts", retry_count);
-        return 1;
-    }
+    // Add performance tracking variables
+    double lastFrameTime = GetTime();
+    int frameCount = 0;
+    float lastCameraZoom = 1.0f;
 
-    // Now we can proceed with game server initialization
-    // Now initialize player manager with authenticated db client
-    PlayerConnectionManager playerManager;
-    if (!initPlayerConnectionManager(&playerManager, &dbState.dbClient, worldId)) {
-        fprintf(stderr, "Failed to initialize player connection manager\n");
-        return 1;
-    }
-
-    // Start WebSocket server with configured port
-    if (!ws_start_server(NULL, game_port)) {  // Listen on all interfaces, port 8080
-        logDebug("Failed to start WebSocket server on port %d", game_port);
-        return 1;
-    }
-    logDebug("WebSocket server started on port %d", game_port);
-
+    // Main game loop
     double lastPhysicsUpdate = GetTime();
     double lastVisualUpdate = GetTime();
-    Vector2 lastCameraOffset = {0};
-    float lastCameraZoom = 1.0f;
-    
-    logDebug("Entering main loop");
-    int frameCount = 0;
-    double lastFrameTime = GetTime();
+    logDebug("Entering main loop - Dashboard active, waiting for database connection");
     
     while (!WindowShouldClose()) {
         double currentTime = GetTime();
-        frameCount++;
         
-        UpdateGameCamera(&camera);
+        // Process database messages and maintain connection
+        if (dbState.dbClient.auth_success) {
+            // Always process messages first
+            if (!db_client_process_messages(&dbState.dbClient)) {
+                dbState.isDbHealthy = false;
+            }
 
-        // Physics updates at 60Hz
-        if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
-            b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
-            lastPhysicsUpdate = currentTime;
-        }
-
-        // Only update visuals at 1Hz
-        bool shouldUpdateVisuals = (currentTime - lastVisualUpdate >= VISUAL_TIME_STEP);
-        
-        if (shouldUpdateVisuals) {
-            // Update cached positions
-            for (int i = 0; i < camera.ships.count; i++) {
-                Ship* ship = &camera.ships.ships[i];
-                if (b2Body_IsValid(ship->id)) {
-                    ship->physicsPos = b2Body_GetPosition(ship->id);
-                    ship->screenPos = physicsToScreen(ship->physicsPos, &camera);
+            // Check if it's time to send a ping
+            time_t now = time(NULL);
+            if (now - dbState.dbClient.ping_state.last_successful > PING_RETRY_INTERVAL_MS/1000) {
+                fprintf(stderr, "Time to send ping (last success: %ld, now: %ld)\n",
+                        dbState.dbClient.ping_state.last_successful, now);
+                if (!db_client_ping(&dbState.dbClient)) {
+                    dbState.isDbHealthy = false;
                 }
             }
-            lastVisualUpdate = currentTime;
         }
 
-        // Database health check
-        if (currentTime - dbState.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL) {
-            bool prevHealth = dbState.isDbHealthy;
-            dbState.isDbHealthy = db_client_ping(&dbState.dbClient);
+        // Try to establish database connection if not connected
+        if (!dbState.isDbHealthy && !dbState.dbClient.is_reconnecting && 
+            (currentTime - dbState.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL)) {
             
-            if (dbState.isDbHealthy) {
-                if (dbState.reconnecting) {
-                    logDebug("Database connection restored");
-                    dbState.reconnecting = false;
+            if (db_client_ensure_connected(&dbState.dbClient)) {
+                updateDatabaseState(&dbState, &dbState.dbClient);
+                if (dbState.isDbHealthy) {
+                    logDebug("Database connection established - player connections enabled");
                 }
-            } else if (prevHealth) {
-                logDebug("WARNING: Database connection lost!");
-                dbState.reconnecting = true;
             }
-            
             dbState.lastHealthCheck = currentTime;
         }
 
-        // Handle any new player connections
-        if (ws_has_pending_connections()) {
+        // Only handle player connections if database is healthy
+        if (dbState.isDbHealthy && ws_has_pending_connections()) {
             const char* token = ws_get_connect_token();
             WebSocket* ws = ws_accept_connection();
             
             if (!handleNewPlayerConnection(&playerManager, token, ws)) {
+                logDebug("Rejected player connection - invalid token");
                 ws_disconnect(ws);
                 free(ws);
             }
         }
 
-        // Check for disconnected players
-        removeDisconnectedPlayers(&playerManager);
+        // Rest of game loop continues normally
+        UpdateGameCamera(&camera);
+        
+        if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
+            b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
+            lastPhysicsUpdate = currentTime;
+        }
 
         BeginDrawing();
         ClearBackground(RAYWHITE);
         
+        // Draw status banner if database is not connected
+        if (!dbState.isDbHealthy) {
+            DrawRectangle(0, 0, GetScreenWidth(), 30, ColorAlpha(RED, 0.8f));
+            DrawText("DATABASE OFFLINE - Player connections disabled", 
+                    10, 5, 20, WHITE);
+        }
+
         DrawPhysicsGrid(50.0f, &camera);
         DrawText("Server Dashboard", 10, 10, 20, BLACK);
         
-        // Draw ships using cached positions
-        for (int i = 0; i < camera.ships.count; i++) {
-            Ship* ship = &camera.ships.ships[i];
-            if (b2Body_IsValid(ship->id)) {
-                b2Rot rot = b2Body_GetRotation(ship->id);
-                float angle = atan2f(rot.s, rot.c);
-                DrawShipHull(ship->screenPos, angle, BLUE, &camera);
-            }
+        // Draw ships and update game state even if database is down
+        updateShipPositions(worldId, &camera);
+        
+        // Draw database connection status
+        // const char* dbStatus = "DB: ";
+        // const char* dbStatusDetail;
+        // Color statusColor;
+        
+        // if (dbState.dbClient.is_reconnecting) {
+        //     dbStatusDetail = "RECONNECTING";
+        //     statusColor = YELLOW;
+        // } else if (dbState.isDbHealthy) {
+        //     dbStatusDetail = "CONNECTED";
+        //     statusColor = GREEN;
+        // } else {
+        //     dbStatusDetail = "DISCONNECTED";
+        //     statusColor = RED;
+        // }
+        
+        // DrawText(TextFormat("%s%s", dbStatus, dbStatusDetail),
+        //         10, GetScreenHeight() - 30, 20, statusColor);
+
+        // Draw extra database info if disconnected
+        if (!dbState.isDbHealthy) {
+            DrawText("Database offline - Game continuing in limited mode", 
+                    10, GetScreenHeight() - 60, 20, YELLOW);
         }
         
         // Update and draw admin panel
@@ -456,8 +481,6 @@ int main() {
         // Log performance stats
         if (currentTime - lastFrameTime >= 5.0) {
             double fps = frameCount / (currentTime - lastFrameTime);
-            logDebug("FPS: %.1f, Ships: %d, Camera zoom: %.2f", 
-                    fps, camera.ships.count, camera.zoom);
             frameCount = 0;
             lastFrameTime = currentTime;
         }
@@ -473,7 +496,7 @@ int main() {
     cleanupPlayerConnectionManager(&playerManager);
     closeAdminWindow(&adminWindow);
     stopAdminConsole(&adminConsole);
-    db_client_cleanup(&dbState.dbClient);
+    // db_client_cleanup(&dbState.dbClient);
     b2DestroyWorld(worldId);
     ws_stop_server();
     CloseWindow();

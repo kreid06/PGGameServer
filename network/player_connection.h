@@ -32,6 +32,7 @@ struct PlayerConnectionManager {
     size_t capacity;
     DatabaseClient* db_client;
     b2WorldId worldId;
+    bool db_ready;
 };
 
 // Type aliases

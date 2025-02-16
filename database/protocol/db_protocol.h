@@ -45,8 +45,8 @@ typedef struct {
 
 // Auth request payload (288 bytes)
 typedef struct {
-    char server_id[32];      // 32 bytes
-    char auth_token[256];    // 256 bytes
+    char server_id[32];       // 32 bytes
+    char auth_token[512];     // Increase from 256 to 512 bytes to safely handle base64 tokens
 } __attribute__((packed)) AuthRequestPayload;
 
 // Auth response structure

@@ -86,5 +86,9 @@ target_link_libraries(game_dashboard PRIVATE
     ${OPENSSL_CRYPTO_LIBRARIES}
 )
 
+# Add pthread library
+find_package(Threads REQUIRED)
+target_link_libraries(game_dashboard PRIVATE Threads::Threads)
+
 
 
