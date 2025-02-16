@@ -403,136 +403,74 @@ int main() {
     while (!WindowShouldClose()) {
         double currentTime = GetTime();
         
-        // Process database messages and maintain connection
-        if (dbState.dbClient.auth_success) {
-            // Always process messages first
-            if (!db_client_process_messages(&dbState.dbClient)) {
-                dbState.isDbHealthy = false;
-            }
+        // Handle UI updates first to maintain responsiveness
+        UpdateGameCamera(&camera);
+        frameCount++;
 
-            // Check if it's time to send a ping
+        // Process network in smaller chunks
+        int max_messages = 10; // Process max 10 messages per frame
+        if (dbState.dbClient.auth_success) {
+            // Process messages in chunks
+            while (max_messages-- > 0 && db_client_process_messages(&dbState.dbClient));
+
+            // Check if it's time for ping
             time_t now = time(NULL);
-            if (now - dbState.dbClient.ping_state.last_successful > PING_RETRY_INTERVAL_MS/1000) {
-                fprintf(stderr, "Time to send ping (last success: %ld, now: %ld)\n",
-                        dbState.dbClient.ping_state.last_successful, now);
+            if (!dbState.dbClient.ping_state.expecting_pong && 
+                (now - dbState.dbClient.ping_state.last_successful > PING_RETRY_INTERVAL_MS/1000)) {
                 if (!db_client_ping(&dbState.dbClient)) {
                     dbState.isDbHealthy = false;
                 }
             }
         }
 
-        // Try to establish database connection if not connected
-        if (!dbState.isDbHealthy && !dbState.dbClient.is_reconnecting && 
-            (currentTime - dbState.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL)) {
-            
-            if (db_client_ensure_connected(&dbState.dbClient)) {
-                updateDatabaseState(&dbState, &dbState.dbClient);
-                if (dbState.isDbHealthy) {
-                    logDebug("Database connection established - player connections enabled");
-                }
-            }
-            dbState.lastHealthCheck = currentTime;
-        }
-
-        // Only handle player connections if database is healthy
-        if (dbState.isDbHealthy && ws_has_pending_connections()) {
-            const char* token = ws_get_connect_token();
-            WebSocket* ws = ws_accept_connection();
-            
-            if (!handleNewPlayerConnection(&playerManager, token, ws)) {
-                logDebug("Rejected player connection - invalid token");
-                ws_disconnect(ws);
-                free(ws);
-            }
-        }
-
-        // Rest of game loop continues normally
-        UpdateGameCamera(&camera);
-        
+        // Update physics at fixed timestep
         if (currentTime - lastPhysicsUpdate >= PHYSICS_TIME_STEP) {
             b2World_Step(worldId, PHYSICS_TIME_STEP, 1);
             lastPhysicsUpdate = currentTime;
         }
 
+        // Start drawing
         BeginDrawing();
         ClearBackground(RAYWHITE);
 
-        // Draw connection status panel
+        // Draw game elements
+        DrawPhysicsGrid(50.0f, &camera);
+        updateShipPositions(worldId, &camera);
+
+        // Draw UI elements last
         ConnectionStatus status = getConnectionStatus(&dbState);
-        Rectangle statusPanel = {10, 10, 300, 100};
-        DrawRectangleRec(statusPanel, ColorAlpha(LIGHTGRAY, 0.3f));
-        DrawText("Database Status", 20, 20, 20, DARKGRAY);
-        DrawText(status.text, 20, 45, 24, status.color);
-        DrawText(status.details, 20, 75, 16, DARKGRAY);
+        
+        // Draw connection status panel with more contrast
+        Rectangle statusPanel = {10, 40, 300, 120}; // Moved down and made taller
+        DrawRectangleRec(statusPanel, ColorAlpha(WHITE, 0.9f)); // More opaque background
+        DrawRectangleLinesEx(statusPanel, 1, DARKGRAY); // Add border
+        DrawText("Database Status", 20, 50, 20, BLACK);
+        DrawText(status.text, 20, 75, 24, status.color);
+        DrawText(status.details, 20, 105, 16, DARKGRAY);
 
         // Draw ping stats if connected
         if (dbState.isDbHealthy) {
             char pingInfo[64];
+            time_t now = time(NULL);
             snprintf(pingInfo, sizeof(pingInfo), "Last Ping: %lds ago", 
-                    time(NULL) - dbState.dbClient.ping_state.last_successful);
-            DrawText(pingInfo, 20, 95, 16, DARKGRAY);
+                    now - dbState.dbClient.ping_state.last_successful);
+            DrawText(pingInfo, 20, 135, 16, DARKGRAY);
         }
 
-        // Draw status banner if database is not connected
-        if (!dbState.isDbHealthy ||dbState.dbClient.is_reconnecting) {
-            DrawRectangle(0, 0, GetScreenWidth(), 30, ColorAlpha(YELLOW, 0.8f));
-            DrawText("DATABASE OFFLINE - Player connections disabled", 
-                    10, 5, 20, WHITE);
-        }
-
-        DrawPhysicsGrid(50.0f, &camera);
-        DrawText("Server Dashboard", 10, 10, 20, BLACK);
-        
-        // Draw ships and update game state even if database is down
-        updateShipPositions(worldId, &camera);
-        
-        // Draw database connection status
-        // const char* dbStatus = "DB: ";
-        // const char* dbStatusDetail;
-        // Color statusColor;
-        
-        // if (dbState.dbClient.is_reconnecting) {
-        //     dbStatusDetail = "RECONNECTING";
-        //     statusColor = YELLOW;
-        // } else if (dbState.isDbHealthy) {
-        //     dbStatusDetail = "CONNECTED";
-        //     statusColor = GREEN;
-        // } else {
-        //     dbStatusDetail = "DISCONNECTED";
-        //     statusColor = RED;
-        // }
-        
-        // DrawText(TextFormat("%s%s", dbStatus, dbStatusDetail),
-        //         10, GetScreenHeight() - 30, 20, statusColor);
-
-        // Draw extra database info if disconnected
-        if (!dbState.isDbHealthy) {
-            DrawText("Database offline - Game continuing in limited mode", 
-                    10, GetScreenHeight() - 60, 20, YELLOW);
-        }
-        
-        // Update and draw admin panel
-        if (IsKeyPressed(KEY_TAB)) {
-            adminWindow.isOpen = !adminWindow.isOpen;
-            logDebug("Admin panel visibility toggled: %d", adminWindow.isOpen);
-        }
-
+        // Draw admin window last
         if (adminWindow.isOpen) {
             updateAdminWindow(&adminWindow);
         }
 
-        
-        // Log performance stats
-        if (currentTime - lastFrameTime >= 5.0) {
-            double fps = frameCount / (currentTime - lastFrameTime);
-            frameCount = 0;
-            lastFrameTime = currentTime;
-        }
+        EndDrawing();
 
-        // Log any significant state changes
-        if (camera.zoom != lastCameraZoom) {
-            logDebug("Camera zoom changed: %.2f -> %.2f", lastCameraZoom, camera.zoom);
-            lastCameraZoom = camera.zoom;
+        // Process connection checks less frequently
+        if (!dbState.isDbHealthy && !dbState.dbClient.is_reconnecting && 
+            (currentTime - dbState.lastHealthCheck >= DB_HEALTH_CHECK_INTERVAL)) {
+            if (db_client_ensure_connected(&dbState.dbClient)) {
+                updateDatabaseState(&dbState, &dbState.dbClient);
+            }
+            dbState.lastHealthCheck = currentTime;
         }
     }
 
